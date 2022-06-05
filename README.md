@@ -22,14 +22,16 @@ You need to modify the settings in the dbus-solaredge.py as needed:
 
 ### Installation
 
-1. Copy the files to the /data folder on your venus:
+1. You need root access to your GX Device (https://www.victronenergy.com/live/ccgx:root_access)
+
+2. Copy the files to the /data folder on your venus:
 
    - /data/dbus-solaredge/dbus-solaredge.py
    - /data/dbus-solaredge/kill_me.sh
    - /data/dbus-solaredge/service/run
    - /data/dbus-solaredge/service/log/run
 
-2. Set permissions for files:
+3. Set permissions for files:
 
   `chmod 755 /data/dbus-solaredge/service/run`
   
@@ -101,7 +103,7 @@ In my installation at home, I am using the following Hardware:
 - SolarEdge SE16K
 - SolarEdge Modbus Meter
 - 3x Victron MultiPlus-II - Battery Inverter (three phase)
-- Cerbo GX
+- Cerbo GX (tested Firmware version: v2.87)
 - DIY Battery 32x 280AH Lifepo EVE Cells with BMS from Batrium 
 
 ### Credits
