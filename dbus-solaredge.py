@@ -28,7 +28,6 @@ import ctypes
 
 log = logging.getLogger("DbusSolarEdge")
 
-# our own packages
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-modem'))
 from vedbus import VeDbusService
 
@@ -36,7 +35,6 @@ from vedbus import VeDbusService
 VERSION     = "0.1"
 SERVER_HOST = "192.168.178.80"
 SERVER_PORT = 502
-#SERVER_UNIT = 126
 UNIT = 2
 # ----------------------------------------------------------------
 CONNECTION  = "ModbusTCP " + SERVER_HOST + ":" + str(SERVER_PORT) + ", UNIT " + str(UNIT)
@@ -59,7 +57,6 @@ modbusClient = ModbusClient(SERVER_HOST, port=SERVER_PORT )
 
 modbusClient.auto_open=True
 
-# open or reconnect TCP to server
 if not modbusClient.is_socket_open():
     if not modbusClient.connect():
         log.error("unable to connect to "+SERVER_HOST+":"+str(SERVER_PORT))
@@ -110,8 +107,6 @@ def dbusconnection():
  
 
 def _update():
-    #log.info('running _update')
-
     try:
         regs = modbusClient.read_holding_registers(40190, 70, unit=UNIT)
 
@@ -184,8 +179,6 @@ def _update():
     except:
         log.error('exception in _update.')
         sys.exit()
-
-    #log.info('done: running _update')
 
     return True
  
