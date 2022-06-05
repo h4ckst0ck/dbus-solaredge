@@ -7,6 +7,9 @@ This service is meant to be run on a raspberry Pi with Venus OS from Victron or 
 
 The Python script cyclically reads data from the SolarEdge Inverter via Sunspec Modbus and publishes information on the dbus, using the services com.victronenergy.grid, com.victronenergy.pvinverter.pv0, com.victronenergy.temperature, com.victronenergy.digitalinput. This makes the Venus OS work as if you had a physical Victron Grid Meter installed and gives all information about PV Intervter load, temperature and if the inveter is in limit mode.
 
+![Dashboard shows Energy flow](images/dashboard.png?raw=true "Dashboard")
+![Menu shows Entries of the Inverter](images/menu.png?raw=true "Menu")
+
 ### Configuration
 
 You need to modify the settings in the dbus-solaredge.py as needed:
