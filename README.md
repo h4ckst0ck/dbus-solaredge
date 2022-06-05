@@ -14,9 +14,9 @@ The Python script cyclically reads data from the SolarEdge Inverter via Sunspec 
 
 You need to modify the settings in the dbus-solaredge.py as needed:
 
-SERVER_HOST = "192.168.178.80"
+`SERVER_HOST = "192.168.178.80"
 SERVER_PORT = 502
-UNIT = 2
+UNIT = 2`
 
 ### Installation
 
