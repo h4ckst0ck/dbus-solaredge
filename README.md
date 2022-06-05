@@ -14,25 +14,24 @@ The Python script cyclically reads data from the SolarEdge Inverter via Sunspec 
 
 You need to modify the settings in the dbus-solaredge.py as needed:
 
-`SERVER_HOST = "192.168.178.80"
-SERVER_PORT = 502
-UNIT = 2`
+`SERVER_HOST = "192.168.178.80"`
+`SERVER_PORT = 502`
+`UNIT = 2`
 
 ### Installation
 
 1. Copy the files to the /data folder on your venus:
 
-   - /data/dbus-solaredge/dbus-fronius-smartmeter.py
+   - /data/dbus-solaredge/dbus-solaredge.py
    - /data/dbus-solaredge/kill_me.sh
    - /data/dbus-solaredge/service/run
    - /data/dbus-solaredge/service/log/run
 
 2. Set permissions for files:
 
-   `chmod 755 /data/dbus-solaredge/service/run`
-    `chmod 755 /data/dbus-solaredge/service/log/run`
-
-   `chmod 744 /data/dbus-solaredge/kill_me.sh`
+  `chmod 755 /data/dbus-solaredge/service/run`
+  `chmod 755 /data/dbus-solaredge/service/log/run`
+  `chmod 744 /data/dbus-solaredge/kill_me.sh`
 
 4. Add a symlink to for auto starting:
 
@@ -51,6 +50,10 @@ It will show something like this:
 `/service/dbus-solaredge: up (pid 8179) 746 seconds`
 
 If the number of seconds is always 0 or 1 or any other small number, it means that the service crashes and gets restarted all the time.
+
+You could also take a look at the log-file:
+`tail -f /var/log/dbus-solaredge/current`
+and see if there are any error messages.
 
 When you think that the script crashes, start it directly from the command line:
 
