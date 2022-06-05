@@ -115,18 +115,18 @@ def _update():
             sys.exit()                                                                             
         else:
            sf = _get_scale_factor(regs.registers[4])
-           dbusservice['grid']['/Ac/L1/Current'] = _get_signed_short(regs.registers[1]) * sf
-           dbusservice['grid']['/Ac/L2/Current'] = _get_signed_short(regs.registers[2]) * sf
-           dbusservice['grid']['/Ac/L3/Current'] = _get_signed_short(regs.registers[3]) * sf
+           dbusservice['grid']['/Ac/L1/Current'] = round(_get_signed_short(regs.registers[1]) * sf, 2)
+           dbusservice['grid']['/Ac/L2/Current'] = round(_get_signed_short(regs.registers[2]) * sf, 2)
+           dbusservice['grid']['/Ac/L3/Current'] = round(_get_signed_short(regs.registers[3]) * sf, 2)
            sf = _get_scale_factor(regs.registers[13])
-           dbusservice['grid']['/Ac/L1/Voltage'] = _get_signed_short(regs.registers[6]) * sf
-           dbusservice['grid']['/Ac/L2/Voltage'] = _get_signed_short(regs.registers[7]) * sf
-           dbusservice['grid']['/Ac/L3/Voltage'] = _get_signed_short(regs.registers[8]) * sf
+           dbusservice['grid']['/Ac/L1/Voltage'] = round(_get_signed_short(regs.registers[6]) * sf, 2)
+           dbusservice['grid']['/Ac/L2/Voltage'] = round(_get_signed_short(regs.registers[7]) * sf, 2)
+           dbusservice['grid']['/Ac/L3/Voltage'] = round(_get_signed_short(regs.registers[8]) * sf, 2)
            sf = _get_scale_factor(regs.registers[20])
-           dbusservice['grid']['/Ac/Power'] = _get_signed_short(regs.registers[16]) * sf * -1 
-           dbusservice['grid']['/Ac/L1/Power'] = _get_signed_short(regs.registers[17]) * sf * -1
-           dbusservice['grid']['/Ac/L2/Power'] = _get_signed_short(regs.registers[18]) * sf * -1
-           dbusservice['grid']['/Ac/L3/Power'] = _get_signed_short(regs.registers[19]) * sf * -1
+           dbusservice['grid']['/Ac/Power'] = round(_get_signed_short(regs.registers[16]) * sf * -1, 2)
+           dbusservice['grid']['/Ac/L1/Power'] = round(_get_signed_short(regs.registers[17]) * sf * -1, 2)
+           dbusservice['grid']['/Ac/L2/Power'] = round(_get_signed_short(regs.registers[18]) * sf * -1, 2)
+           dbusservice['grid']['/Ac/L3/Power'] = round(_get_signed_short(regs.registers[19]) * sf * -1, 2)
            sf = _get_scale_factor(regs.registers[52])
            dbusservice['grid']['/Ac/Energy/Reverse'] = float((regs.registers[36] << 16) + regs.registers[37]) * sf / 1000
            dbusservice['grid']['/Ac/L1/Energy/Reverse'] = float((regs.registers[38] << 16) + regs.registers[39]) * sf / 1000
@@ -145,19 +145,19 @@ def _update():
             sys.exit()                                                                             
         else:
            sf = _get_scale_factor(regs.registers[4])
-           dbusservice['pvinverter.pv0']['/Ac/L1/Current'] = regs.registers[1] * sf
-           dbusservice['pvinverter.pv0']['/Ac/L2/Current'] = regs.registers[2] * sf
-           dbusservice['pvinverter.pv0']['/Ac/L3/Current'] = regs.registers[3] * sf
+           dbusservice['pvinverter.pv0']['/Ac/L1/Current'] = round(regs.registers[1] * sf, 2)
+           dbusservice['pvinverter.pv0']['/Ac/L2/Current'] = round(regs.registers[2] * sf, 2)
+           dbusservice['pvinverter.pv0']['/Ac/L3/Current'] = round(regs.registers[3] * sf, 2)
            sf = _get_scale_factor(regs.registers[11])
-           dbusservice['pvinverter.pv0']['/Ac/L1/Voltage'] = regs.registers[8] * sf
-           dbusservice['pvinverter.pv0']['/Ac/L2/Voltage'] = regs.registers[9] * sf
-           dbusservice['pvinverter.pv0']['/Ac/L3/Voltage'] = regs.registers[10] * sf
+           dbusservice['pvinverter.pv0']['/Ac/L1/Voltage'] = round(regs.registers[8] * sf, 2)
+           dbusservice['pvinverter.pv0']['/Ac/L2/Voltage'] = round(regs.registers[9] * sf, 2)
+           dbusservice['pvinverter.pv0']['/Ac/L3/Voltage'] = round(regs.registers[10] * sf, 2)
            sf = _get_scale_factor(regs.registers[13])
            acpower = _get_signed_short(regs.registers[12]) * sf
            dbusservice['pvinverter.pv0']['/Ac/Power'] = acpower
-           dbusservice['pvinverter.pv0']['/Ac/L1/Power'] = _get_signed_short(regs.registers[12]) * sf / 3
-           dbusservice['pvinverter.pv0']['/Ac/L2/Power'] = _get_signed_short(regs.registers[12]) * sf / 3
-           dbusservice['pvinverter.pv0']['/Ac/L3/Power'] = _get_signed_short(regs.registers[12]) * sf / 3
+           dbusservice['pvinverter.pv0']['/Ac/L1/Power'] = round(_get_signed_short(regs.registers[12]) * sf / 3, 2)
+           dbusservice['pvinverter.pv0']['/Ac/L2/Power'] = round(_get_signed_short(regs.registers[12]) * sf / 3, 2)
+           dbusservice['pvinverter.pv0']['/Ac/L3/Power'] = round(_get_signed_short(regs.registers[12]) * sf / 3, 2)
            sf = _get_scale_factor(regs.registers[24])
            dbusservice['pvinverter.pv0']['/Ac/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 1000
            dbusservice['pvinverter.pv0']['/Ac/L1/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000
@@ -168,7 +168,7 @@ def _update():
            dbusservice['pvinverter.pv0']['/ErrorCode'] = regs.registers[37]
 
            sf = _get_scale_factor(regs.registers[35])
-           dbusservice['adc-temp0']['/Temperature'] = regs.registers[32] * sf
+           dbusservice['adc-temp0']['/Temperature'] = round(regs.registers[32] * sf, 2)
 
            if ((regs.registers[36] == 5) & (acpower > 100)):
                dbusservice['digitalinput0']['/State'] = 3
