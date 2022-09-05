@@ -205,7 +205,7 @@ def new_service(base, type, physical, id, instance):
             # read registers, store result in regs list
             regs = modbusClient.read_holding_registers(40123, 64, unit=UNIT)
             if regs.isError():
-                log.error('regs.isError: '+regs)
+                log.error('regs.isError: {regs}')
                 sys.exit()                                                                             
             else:
                 self.add_path('/DeviceInstance', instance)
