@@ -45,6 +45,9 @@ You need to modify the settings in the dbus-solaredge.py as needed:
 
    The supervisor should automatically start this service within seconds.
 
+5. If the gridmeter does not show up in the console, please ensure you have configured AC-In as "Grid" see (https://community.victronenergy.com/questions/82440/multiplus-vrm-system-overview-ac-input-not-availab.html)
+
+
 ### Debugging
 
 You can check the status of the service with svstat:
