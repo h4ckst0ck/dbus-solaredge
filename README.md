@@ -43,10 +43,13 @@ You need to modify the settings in the dbus-solaredge.py as needed:
 
    `ln -s /data/dbus-solaredge/service/ /opt/victronenergy/service/dbus-solaredge`
 
-   The supervisor should automatically start this service within seconds.
+   The supervisor should automatically start this service within seconds, if not simply reboot your system.
 
 5. If the gridmeter does not show up in the console, please ensure you have configured AC-In as "Grid" see (https://community.victronenergy.com/questions/82440/multiplus-vrm-system-overview-ac-input-not-availab.html)
 
+### Upgrading Venus OS
+
+If you are upgrading your Venus OS you will have to re-add the symlink for autostarting the python script (Repeat step 4 from the above installation instructions).
 
 ### Debugging
 
@@ -106,7 +109,7 @@ In my installation at home, I am using the following Hardware:
 - SolarEdge SE16K
 - SolarEdge Modbus Meter
 - 3x Victron MultiPlus-II - Battery Inverter (three phase)
-- Cerbo GX (tested Firmware version: v2.87)
+- Cerbo GX (tested Firmware version: v2.87 and v2.92)
 - DIY Battery 32x 280AH Lifepo EVE Cells with BMS from Batrium 
 
 ### Credits
