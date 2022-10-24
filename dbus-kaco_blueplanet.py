@@ -26,16 +26,16 @@ from pymodbus.client.sync import ModbusTcpClient as ModbusClient
 import time
 import ctypes
 
-log = logging.getLogger("DbusKaco")
+log = logging.getLogger("DbusSolarEdge")
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-modem'))
 from vedbus import VeDbusService
 
 # ----------------------------------------------------------------
 VERSION     = "0.1"
-SERVER_HOST = "192.168.178.80"
+SERVER_HOST = "192.168.2.190"
 SERVER_PORT = 502
-UNIT = 2
+UNIT = 1
 # ----------------------------------------------------------------
 CONNECTION  = "ModbusTCP " + SERVER_HOST + ":" + str(SERVER_PORT) + ", UNIT " + str(UNIT)
 
@@ -80,18 +80,21 @@ def _get_scale_factor(regs):
     return 10**_get_signed_short(regs)
 
 def _get_victron_pv_state(state):
-    if (state == 1):
+    if (state == 1):        # Device is not operating
         return 0 
-    elif (state == 3):
+    elif (state == 3):      # Device is staring up
         return 1
-    elif (state == 4):
+    elif (state == 4):      # Device is auto tracking maximum power
         return 11
-    elif (state == 5):
+    elif (state == 5):      # Device is operating at reduced power output
         return 12
-    elif (state == 7):
+    elif (state == 7):      # One or more faults exist
         return 10
     else:
-        return 8
+        return 8            # Device is in standby mode
+        
+# State 2 = Device is sleeping / auto-shutdown
+# State 6 = Device is shutting down        
 
 # Again not all of these needed this is just duplicating the Victron code.
 class SystemBus(dbus.bus.BusConnection):
@@ -108,46 +111,46 @@ def dbusconnection():
 
 def _update():
     try:
-        regs = modbusClient.read_holding_registers(40190, 70, unit=UNIT)
+        # regs = modbusClient.read_holding_registers(40190, 70, unit=UNIT)
 
-        if regs.isError():
-            log.error('regs.isError: '+regs)
-            sys.exit()                                                                             
-        else:
-           sf = _get_scale_factor(regs.registers[4])
-           dbusservice['grid']['/Ac/L1/Current'] = round(_get_signed_short(regs.registers[1]) * sf, 2)
-           dbusservice['grid']['/Ac/L2/Current'] = round(_get_signed_short(regs.registers[2]) * sf, 2)
-           dbusservice['grid']['/Ac/L3/Current'] = round(_get_signed_short(regs.registers[3]) * sf, 2)
-           sf = _get_scale_factor(regs.registers[13])
-           dbusservice['grid']['/Ac/L1/Voltage'] = round(_get_signed_short(regs.registers[6]) * sf, 2)
-           dbusservice['grid']['/Ac/L2/Voltage'] = round(_get_signed_short(regs.registers[7]) * sf, 2)
-           dbusservice['grid']['/Ac/L3/Voltage'] = round(_get_signed_short(regs.registers[8]) * sf, 2)
-           sf = _get_scale_factor(regs.registers[20])
-           dbusservice['grid']['/Ac/Power'] = round(_get_signed_short(regs.registers[16]) * sf * -1, 2)
-           dbusservice['grid']['/Ac/L1/Power'] = round(_get_signed_short(regs.registers[17]) * sf * -1, 2)
-           dbusservice['grid']['/Ac/L2/Power'] = round(_get_signed_short(regs.registers[18]) * sf * -1, 2)
-           dbusservice['grid']['/Ac/L3/Power'] = round(_get_signed_short(regs.registers[19]) * sf * -1, 2)
-           sf = _get_scale_factor(regs.registers[52])
-           dbusservice['grid']['/Ac/Energy/Reverse'] = float((regs.registers[36] << 16) + regs.registers[37]) * sf / 1000
-           dbusservice['grid']['/Ac/L1/Energy/Reverse'] = float((regs.registers[38] << 16) + regs.registers[39]) * sf / 1000
-           dbusservice['grid']['/Ac/L2/Energy/Reverse'] = float((regs.registers[40] << 16) + regs.registers[41]) * sf / 1000
-           dbusservice['grid']['/Ac/L3/Energy/Reverse'] = float((regs.registers[42] << 16) + regs.registers[43]) * sf / 1000
-           dbusservice['grid']['/Ac/Energy/Forward'] = float((regs.registers[44] << 16) + regs.registers[45]) * sf / 1000
-           dbusservice['grid']['/Ac/L1/Energy/Forward'] = float((regs.registers[46] << 16) + regs.registers[47]) * sf / 1000
-           dbusservice['grid']['/Ac/L2/Energy/Forward'] = float((regs.registers[48] << 16) + regs.registers[49]) * sf / 1000
-           dbusservice['grid']['/Ac/L3/Energy/Forward'] = float((regs.registers[50] << 16) + regs.registers[51]) * sf / 1000
+        # if regs.isError():
+            # log.error('regs.isError: '+regs)
+            # sys.exit()                                                                             
+        # else:
+           # sf = _get_scale_factor(regs.registers[4])
+           # #dbusservice['grid']['/Ac/L1/Current'] = round(_get_signed_short(regs.registers[1]) * sf, 2)
+           # #dbusservice['grid']['/Ac/L2/Current'] = round(_get_signed_short(regs.registers[2]) * sf, 2)
+           # #dbusservice['grid']['/Ac/L3/Current'] = round(_get_signed_short(regs.registers[3]) * sf, 2)
+           # sf = _get_scale_factor(regs.registers[13])
+           # dbusservice['grid']['/Ac/L1/Voltage'] = round(_get_signed_short(regs.registers[6]) * sf, 2)
+           # dbusservice['grid']['/Ac/L2/Voltage'] = round(_get_signed_short(regs.registers[7]) * sf, 2)
+           # dbusservice['grid']['/Ac/L3/Voltage'] = round(_get_signed_short(regs.registers[8]) * sf, 2)
+           # sf = _get_scale_factor(regs.registers[20])
+           # dbusservice['grid']['/Ac/Power'] = round(_get_signed_short(regs.registers[16]) * sf * -1, 2)
+           # dbusservice['grid']['/Ac/L1/Power'] = round(_get_signed_short(regs.registers[17]) * sf * -1, 2)
+           # dbusservice['grid']['/Ac/L2/Power'] = round(_get_signed_short(regs.registers[18]) * sf * -1, 2)
+           # dbusservice['grid']['/Ac/L3/Power'] = round(_get_signed_short(regs.registers[19]) * sf * -1, 2)
+           # sf = _get_scale_factor(regs.registers[52])
+           # dbusservice['grid']['/Ac/Energy/Reverse'] = float((regs.registers[36] << 16) + regs.registers[37]) * sf / 1000
+           # dbusservice['grid']['/Ac/L1/Energy/Reverse'] = float((regs.registers[38] << 16) + regs.registers[39]) * sf / 1000
+           # dbusservice['grid']['/Ac/L2/Energy/Reverse'] = float((regs.registers[40] << 16) + regs.registers[41]) * sf / 1000
+           # dbusservice['grid']['/Ac/L3/Energy/Reverse'] = float((regs.registers[42] << 16) + regs.registers[43]) * sf / 1000
+           # dbusservice['grid']['/Ac/Energy/Forward'] = float((regs.registers[44] << 16) + regs.registers[45]) * sf / 1000
+           # dbusservice['grid']['/Ac/L1/Energy/Forward'] = float((regs.registers[46] << 16) + regs.registers[47]) * sf / 1000
+           # dbusservice['grid']['/Ac/L2/Energy/Forward'] = float((regs.registers[48] << 16) + regs.registers[49]) * sf / 1000
+           # dbusservice['grid']['/Ac/L3/Energy/Forward'] = float((regs.registers[50] << 16) + regs.registers[51]) * sf / 1000
 
         # read registers, store result in regs list
-        regs = modbusClient.read_holding_registers(40071, 38, unit=UNIT)
-
+        regs = modbusClient.read_holding_registers(40072, 50, unit=UNIT)
         if regs.isError():
-            log.error('regs.isError: '+regs)
+            log.error('regs.isError: {regs}')
             sys.exit()                                                                             
         else:
            sf = _get_scale_factor(regs.registers[4])
            dbusservice['pvinverter.pv0']['/Ac/L1/Current'] = round(regs.registers[1] * sf, 2)
            dbusservice['pvinverter.pv0']['/Ac/L2/Current'] = round(regs.registers[2] * sf, 2)
            dbusservice['pvinverter.pv0']['/Ac/L3/Current'] = round(regs.registers[3] * sf, 2)
+           dbusservice['pvinverter.pv0']['/Ac/Current'] = round(regs.registers[1] * sf + regs.registers[2] * sf + regs.registers[3] * sf , 2)
            sf = _get_scale_factor(regs.registers[11])
            dbusservice['pvinverter.pv0']['/Ac/L1/Voltage'] = round(regs.registers[8] * sf, 2)
            dbusservice['pvinverter.pv0']['/Ac/L2/Voltage'] = round(regs.registers[9] * sf, 2)
@@ -159,25 +162,26 @@ def _update():
            dbusservice['pvinverter.pv0']['/Ac/L2/Power'] = round(_get_signed_short(regs.registers[12]) * sf / 3, 2)
            dbusservice['pvinverter.pv0']['/Ac/L3/Power'] = round(_get_signed_short(regs.registers[12]) * sf / 3, 2)
            sf = _get_scale_factor(regs.registers[24])
-           dbusservice['pvinverter.pv0']['/Ac/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 1000
-           dbusservice['pvinverter.pv0']['/Ac/L1/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000
-           dbusservice['pvinverter.pv0']['/Ac/L2/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000
-           dbusservice['pvinverter.pv0']['/Ac/L3/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000
+           dbusservice['pvinverter.pv0']['/Ac/Energy/Forward'] = round(float((regs.registers[22] << 16) + regs.registers[23]) * sf / 1000,3)
+           dbusservice['pvinverter.pv0']['/Ac/L1/Energy/Forward'] = round(float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000,3)
+           dbusservice['pvinverter.pv0']['/Ac/L2/Energy/Forward'] = round(float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000,3)
+           dbusservice['pvinverter.pv0']['/Ac/L3/Energy/Forward'] = round(float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000,3)
            
            dbusservice['pvinverter.pv0']['/StatusCode'] = _get_victron_pv_state(regs.registers[36])
            dbusservice['pvinverter.pv0']['/ErrorCode'] = regs.registers[37]
 
            sf = _get_scale_factor(regs.registers[35])
-           dbusservice['adc-temp0']['/Temperature'] = round(regs.registers[32] * sf, 2)
+           dbusservice['adc-temp0']['/Temperature'] = round(regs.registers[31] * sf, 2)
 
-           if ((regs.registers[36] == 5) & (acpower > 100)):
-               dbusservice['digitalinput0']['/State'] = 3
-               dbusservice['digitalinput0']['/Alarm'] = 2
-           else:
-               dbusservice['digitalinput0']['/State'] = 2
-               dbusservice['digitalinput0']['/Alarm'] = 0
-    except:
+           # if ((regs.registers[36] == 5) & (acpower > 100)):
+               # dbusservice['digitalinput0']['/State'] = 3
+               # dbusservice['digitalinput0']['/Alarm'] = 2
+           # else:
+               # dbusservice['digitalinput0']['/State'] = 2
+               # dbusservice['digitalinput0']['/Alarm'] = 0
+    except Exception as e:
         log.error('exception in _update.')
+        log.exception(str(e))
         sys.exit()
 
     return True
@@ -241,21 +245,22 @@ def new_service(base, type, physical, id, instance):
             # read registers, store result in regs list
             regs = modbusClient.read_holding_registers(40004, 56, unit=UNIT)
             if regs.isError():
-                log.error('regs.isError: '+regs)
+                log.error('regs.isError: {regs}')
                 sys.exit()                                                                             
             else:   
                 self.add_path('/DeviceInstance', instance)
-                self.add_path('/FirmwareVersion', _get_string(regs.registers[32:47]))
+                self.add_path('/FirmwareVersion', _get_string(regs.registers[40:43]))
                 self.add_path('/DataManagerVersion', VERSION)
                 self.add_path('/Serial', _get_string(regs.registers[48:55]))
                 self.add_path('/Mgmt/Connection', CONNECTION)
                 self.add_path('/ProductId', 41284) # value used in ac_sensor_bridge.cpp of dbus-cgwacs
-                self.add_path('/ProductName', _get_string(regs.registers[0:15])+" "+_get_string(regs.registers[16:31]))
+                self.add_path('/ProductName', _get_string(regs.registers[0:15]) +" "+_get_string(regs.registers[16:31]))
                 self.add_path('/Ac/Energy/Forward', None, gettextcallback=_kwh)
                 self.add_path('/Ac/Power', None, gettextcallback=_w)
                 self.add_path('/Ac/L1/Current', None, gettextcallback=_a)
                 self.add_path('/Ac/L2/Current', None, gettextcallback=_a)
                 self.add_path('/Ac/L3/Current', None, gettextcallback=_a)
+                self.add_path('/Ac/Current', None, gettextcallback=_a)
                 self.add_path('/Ac/L1/Energy/Forward', None, gettextcallback=_kwh)
                 self.add_path('/Ac/L2/Energy/Forward', None, gettextcallback=_kwh)
                 self.add_path('/Ac/L3/Energy/Forward', None, gettextcallback=_kwh)
@@ -276,15 +281,15 @@ def new_service(base, type, physical, id, instance):
             # read registers, store result in regs list
             regs = modbusClient.read_holding_registers(40004, 56, unit=UNIT)
             if regs.isError():
-                log.error('regs.isError: '+regs)
+                log.error('regs.isError: {regs}')
                 sys.exit()                                                                             
             else:   
                 self.add_path('/DeviceInstance', instance)
-                self.add_path('/FirmwareVersion', _get_string(regs.registers[32:47]))
+                self.add_path('/FirmwareVersion', _get_string(regs.registers[40:43]))
                 self.add_path('/DataManagerVersion', VERSION)
                 self.add_path('/Serial', _get_string(regs.registers[48:55]))
                 self.add_path('/Mgmt/Connection', CONNECTION)
-                self.add_path('/ProductName', _get_string(regs.registers[0:15])+" "+_get_string(regs.registers[16:31]))
+                self.add_path('/ProductName', _get_string(regs.registers[0:15]) +" "+_get_string(regs.registers[16:31]))
                 self.add_path('/ProductId', 0) 
                 self.add_path('/CustomName', 'PV Inverter Temperature')
                 self.add_path('/Temperature', None, gettextcallback=_c)
@@ -301,7 +306,7 @@ def new_service(base, type, physical, id, instance):
                 sys.exit()                                                                             
             else:   
                 self.add_path('/DeviceInstance', instance)
-                self.add_path('/FirmwareVersion', _get_string(regs.registers[32:47]))
+                self.add_path('/FirmwareVersion', _get_string(regs.registers[40:43]))
                 self.add_path('/DataManagerVersion', VERSION)
                 self.add_path('/Serial', _get_string(regs.registers[48:55]))
                 self.add_path('/Mgmt/Connection', CONNECTION)
@@ -323,10 +328,10 @@ base = 'com.victronenergy'
 # service defined by (base*, type*, id*, instance):
 # * items are include in service name
 # Create all the dbus-services we want
-dbusservice['grid']           = new_service(base, 'grid',           'grid',              0, 0)
+#dbusservice['grid']           = new_service(base, 'grid',           'grid',              0, 0)
 dbusservice['pvinverter.pv0'] = new_service(base, 'pvinverter.pv0', 'pvinverter',        0, 20)
 dbusservice['adc-temp0']      = new_service(base, 'temperature',    'temp_pvinverter',   0, 26)
-dbusservice['digitalinput0']  = new_service(base, 'digitalinput',    'limit_pvinverter', 0, 10)
+#dbusservice['digitalinput0']  = new_service(base, 'digitalinput',    'limit_pvinverter', 0, 10)
 
 # Everything done so just set a time to run an update function to update the data values every second.
 gobject.timeout_add(1000, _update)
