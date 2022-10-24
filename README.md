@@ -45,8 +45,6 @@ You need to modify the settings in the dbus-kaco_blueplanet.py as needed:
 
    The supervisor should automatically start this service within seconds, if not simply reboot your system.
 
-5. If the gridmeter does not show up in the console, please ensure you have configured AC-In as "Grid" see (https://community.victronenergy.com/questions/82440/multiplus-vrm-system-overview-ac-input-not-availab.html)
-
 ### Upgrading Venus OS
 
 If you are upgrading your Venus OS you will have to re-add the symlink for autostarting the python script (Repeat step 4 from the above installation instructions).
