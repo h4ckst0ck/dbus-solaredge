@@ -26,7 +26,7 @@ from pymodbus.client.sync import ModbusTcpClient as ModbusClient
 import time
 import ctypes
 
-log = logging.getLogger("DbusSolarEdge")
+log = logging.getLogger("DbusKaco")
 
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-modem'))
 from vedbus import VeDbusService
