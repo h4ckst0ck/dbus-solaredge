@@ -111,7 +111,7 @@ def _update():
         regs = modbusClient.read_holding_registers(40190, 70, unit=UNIT)
 
         if regs.isError():
-            log.error('regs.isError: '+regs)
+            log.error('regs.isError: '+str(regs))
             sys.exit()                                                                             
         else:
            sf = _get_scale_factor(regs.registers[4])
@@ -141,7 +141,7 @@ def _update():
         regs = modbusClient.read_holding_registers(40071, 38, unit=UNIT)
 
         if regs.isError():
-            log.error('regs.isError: '+regs)
+            log.error('regs.isError: '+str(regs))
             sys.exit()                                                                             
         else:
            sf = _get_scale_factor(regs.registers[4])
@@ -205,7 +205,7 @@ def new_service(base, type, physical, id, instance):
             # read registers, store result in regs list
             regs = modbusClient.read_holding_registers(40123, 64, unit=UNIT)
             if regs.isError():
-                log.error('regs.isError: {regs}')
+                log.error('regs.isError: '+str(regs))
                 sys.exit()                                                                             
             else:
                 self.add_path('/DeviceInstance', instance)
@@ -241,7 +241,7 @@ def new_service(base, type, physical, id, instance):
             # read registers, store result in regs list
             regs = modbusClient.read_holding_registers(40004, 56, unit=UNIT)
             if regs.isError():
-                log.error('regs.isError: '+regs)
+                log.error('regs.isError: '+str(regs))
                 sys.exit()                                                                             
             else:   
                 self.add_path('/DeviceInstance', instance)
@@ -276,7 +276,7 @@ def new_service(base, type, physical, id, instance):
             # read registers, store result in regs list
             regs = modbusClient.read_holding_registers(40004, 56, unit=UNIT)
             if regs.isError():
-                log.error('regs.isError: '+regs)
+                log.error('regs.isError: '+str(regs))
                 sys.exit()                                                                             
             else:   
                 self.add_path('/DeviceInstance', instance)
@@ -297,7 +297,7 @@ def new_service(base, type, physical, id, instance):
             # read registers, store result in regs list
             regs = modbusClient.read_holding_registers(40004, 56, unit=UNIT)
             if regs.isError():
-                log.error('regs.isError: '+regs)
+                log.error('regs.isError: '+str(regs))
                 sys.exit()                                                                             
             else:   
                 self.add_path('/DeviceInstance', instance)
