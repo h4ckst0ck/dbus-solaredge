@@ -35,7 +35,7 @@ from vedbus import VeDbusService
 VERSION     = "0.1"
 SERVER_HOST = "192.168.178.80"
 SERVER_PORT = 502
-UNIT = 2
+UNIT = 2 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID
 # ----------------------------------------------------------------
 CONNECTION  = "ModbusTCP " + SERVER_HOST + ":" + str(SERVER_PORT) + ", UNIT " + str(UNIT)
 
