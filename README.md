@@ -18,7 +18,10 @@ You need to modify the settings in the dbus-solaredge.py as needed:
 
 `SERVER_PORT = 502`
 
-`UNIT = 2`
+`UNIT = 2 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID` 
+
+
+
 
 ### Installation
 
