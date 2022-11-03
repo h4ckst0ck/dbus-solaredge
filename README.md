@@ -14,8 +14,6 @@ The Python script cyclically reads data from the SolarEdge Inverter via Sunspec 
 
 Caution: There must be no other Modbus connection to the SolarEdge inverter. If the inverter is already connected in Venus OS with the Modbus functionality provided by Victron, this must be terminated beforehand! The SolarEdge supports only one TCP connection for Modbus and the data would also be redundant as the Python script also passes the data for the inverter to the Venus OS. But now you also get the gridmeter, which is not supported by Victron. 
 
-Translated with www.DeepL.com/Translator (free version)
-
 ### Configuration
 
 You need to modify the settings in the dbus-solaredge.py as needed:
