@@ -1,3 +1,3 @@
 #!/bin/sh
-python /data/dbus-solaredge/dbus-solaredge.py
+python /data/dbus-kaco_blueplanet/dbus-kaco_blueplanet.py
 
