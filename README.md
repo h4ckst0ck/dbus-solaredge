@@ -51,7 +51,7 @@ If you are upgrading your Venus OS you will have to re-add the symlink for autos
 
 To avoid having to manually do this, add
 
-`!#/bin/bash`
+`!#/bin/bash`<br>
 `ln -s /data/dbus-kaco_blueplanet/service/ /opt/victronenergy/service/dbus-kaco_blueplanet`
 
 to /data/rc.local This will execute adding the link late at every startup.
