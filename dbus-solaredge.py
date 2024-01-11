@@ -22,6 +22,9 @@ import os
 import requests # for http GET
 # from pyModbusTCP.client import ModbusClient
 from pymodbus.client.sync import ModbusTcpClient as ModbusClient
+from pymodbus.constants import Endian
+from pymodbus.payload import BinaryPayloadDecoder
+from pymodbus.payload import BinaryPayloadBuilder
 
 import time
 import ctypes
@@ -176,12 +179,84 @@ def _update():
            else:
                dbusservice['digitalinput0']['/State'] = 2
                dbusservice['digitalinput0']['/Alarm'] = 0
+
+           # Read AdvancedPwrControlEn
+           regs = modbusClient.read_holding_registers( address=0xF142, count=2, unit=UNIT )
+
+           if regs.isError():
+               log.error('regs.isError: '+str(regs))
+               sys.exit()
+           else:
+               # log.info("_update(): enable registers %s" % regs.registers )
+               decoder = BinaryPayloadDecoder.fromRegisters( regs.registers, byteorder=Endian.Big, wordorder=Endian.Little )
+               dbusservice['pvinverter.pv0']['/Ac/AdvancedPwrControlEn'] = decoder.decode_32bit_int()
+
+           # Read power limiter register
+           regs = modbusClient.read_holding_registers( address=0xF001, count=1, unit=UNIT )
+
+           if regs.isError():
+               log.error('regs.isError: '+str(regs))
+               sys.exit()
+           else:
+               decoder = BinaryPayloadDecoder.fromRegisters( regs.registers, byteorder=Endian.Big, wordorder=Endian.Little )
+               dbusservice['pvinverter.pv0']['/Ac/ActivePowerLimit'] = decoder.decode_16bit_uint()
+
     except:
         log.error('exception in _update.')
         sys.exit()
 
     return True
- 
+
+def _handleAdvancedPwrControlEn(path, value):
+    # log.info("_handleAdvancedPwrControlEn(): someone else updated %s to %s" % (path, value))
+
+    try:
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_32bit_int( value )
+        # log.info("_handleAdvancedPwrControlEn(): registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF142, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+
+    except Exception as e:
+        log.error('Exception in _handleAdvancedPwrControlEn(): %s' % e )
+        sys.exit()
+
+    return True # accept the change
+
+def _handleActivePowerLimit(path, value):
+    # log.info("_handleActivePowerLimit(): someone else updated %s to %s" % (path, value))
+    if ((value < 0) or (value > 100)):
+        log.info("_handleActivePowerLimit(): value out of scope (0 <= value <= 100" )
+        return False
+
+    try:
+        # Write new Active Power Limit
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_16bit_uint( value )
+        # log.info("_handleActivePowerLimit(): write registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF001, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+
+        # Commit new Active Power Limit
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_16bit_int( 1 )
+        # log.info("_handleActivePowerLimit(): commit registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF100, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+
+
+    except Exception as e:
+        log.error('Exception in _handleActivePowerLimit(): %s' % e )
+        sys.exit()
+
+    return True # accept the change
+
 # Here is the bit you need to create multiple new services - try as much as possible timplement the Victron Dbus API requirements.
 def new_service(base, type, physical, id, instance):
     self =  VeDbusService("{}.{}.{}_id{:02d}".format(base, type, physical,  id), dbusconnection())
@@ -197,6 +272,7 @@ def new_service(base, type, physical, id, instance):
     _w = lambda p, v: (str(v) + 'W')
     _v = lambda p, v: (str(v) + 'V')
     _c = lambda p, v: (str(v) + 'C')
+    _p = lambda p, v: (str(v) + 'P')
 
     # Create device type specific objects
     if physical == 'grid':
@@ -270,6 +346,9 @@ def new_service(base, type, physical, id, instance):
                 self.add_path('/Position', 0)
                 self.add_path('/StatusCode', None)
 
+                self.add_path('/Ac/AdvancedPwrControlEn', value=None, description='Enable SolarEdge Power Limitation', writeable=True, onchangecallback=_handleAdvancedPwrControlEn )
+                self.add_path('/Ac/ActivePowerLimit', value=None, description='SolarEdge Active Power Limit in %', writeable=True, onchangecallback=_handleActivePowerLimit, gettextcallback=_p )
+
     if physical == 'temp_pvinverter':
         # if open() is ok, read register (modbus function 0x03)
         if modbusClient.is_socket_open():
@@ -326,7 +405,7 @@ base = 'com.victronenergy'
 dbusservice['grid']           = new_service(base, 'grid',           'grid',              0, 0)
 dbusservice['pvinverter.pv0'] = new_service(base, 'pvinverter.pv0', 'pvinverter',        0, 20)
 dbusservice['adc-temp0']      = new_service(base, 'temperature',    'temp_pvinverter',   0, 26)
-dbusservice['digitalinput0']  = new_service(base, 'digitalinput',    'limit_pvinverter', 0, 10)
+dbusservice['digitalinput0']  = new_service(base, 'digitalinput',   'limit_pvinverter',  0, 10)
 
 # Everything done so just set a time to run an update function to update the data values every second.
 gobject.timeout_add(1000, _update)
