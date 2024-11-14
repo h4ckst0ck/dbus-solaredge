@@ -19,9 +19,13 @@ import argparse
 import logging
 import sys
 import os
+import math
 import requests # for http GET
 # from pyModbusTCP.client import ModbusClient
 from pymodbus.client.sync import ModbusTcpClient as ModbusClient
+from pymodbus.constants import Endian
+from pymodbus.payload import BinaryPayloadDecoder
+from pymodbus.payload import BinaryPayloadBuilder
 
 import time
 import ctypes
@@ -32,12 +36,16 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/d
 from vedbus import VeDbusService
 
 # ----------------------------------------------------------------
-VERSION     = "0.1"
-SERVER_HOST = "192.168.178.80"
+VERSION     = "0.2"
 SERVER_PORT = 502
-UNIT = 2 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID
+# setup the SolarEdge inverter based on this guide: https://www.victronenergy.com/live/venus-os:gx_solaredge
+UNIT = 126 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID
 # ----------------------------------------------------------------
 CONNECTION  = "ModbusTCP " + SERVER_HOST + ":" + str(SERVER_PORT) + ", UNIT " + str(UNIT)
+
+# max power (W) of the SolarEdge PV inverter (will be initialized later and read out from SE)
+# can be set to a fixed value (e.g. 25000 for a SE25K) in case the value can not get via modbus
+maxPower = 0 
 
 # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
 DBusGMainLoop(set_as_default=True)
@@ -63,6 +71,9 @@ if not modbusClient.is_socket_open():
         sys.exit()
 
 log.info('Connected to Modbus Server.')
+
+if (maxPower != 0):
+    log.info('Inverter maxPower manually set to %s W' % maxPower)
 
 def _get_string(regs):
     numbers = []
@@ -107,6 +118,7 @@ def dbusconnection():
  
 
 def _update():
+    global maxPower
     try:
         regs = modbusClient.read_holding_registers(40190, 70, unit=UNIT)
 
@@ -176,12 +188,152 @@ def _update():
            else:
                dbusservice['digitalinput0']['/State'] = 2
                dbusservice['digitalinput0']['/Alarm'] = 0
+
+           # Read AdvancedPwrControlEn
+           regs = modbusClient.read_holding_registers( address=0xF142, count=2, unit=UNIT )
+
+           if regs.isError():
+               log.error('regs.isError: '+str(regs))
+               sys.exit()
+           else:
+               # log.info("_update(): enable registers %s" % regs.registers )
+               decoder = BinaryPayloadDecoder.fromRegisters( regs.registers, byteorder=Endian.Big, wordorder=Endian.Little )
+               dbusservice['pvinverter.pv0']['/Ac/AdvancedPwrControlEn'] = decoder.decode_32bit_int()
+
+           # Read MaxActivePower
+           regs = modbusClient.read_holding_registers( address=0xF304, count=2, unit=UNIT )
+
+           if regs.isError():
+               log.error('regs.isError: '+str(regs))
+               sys.exit()
+           else:
+               decoder = BinaryPayloadDecoder.fromRegisters( regs.registers, byteorder=Endian.Big, wordorder=Endian.Little )
+               decodedMaxPower = decoder.decode_32bit_float()
+
+               if maxPower != decodedMaxPower:
+                  log.info('Inverter maxPower received: %s W' % decodedMaxPower)
+
+               maxPower = decodedMaxPower
+               dbusservice['pvinverter.pv0']['/Ac/MaxPower'] = decodedMaxPower
+
+           # Read power limiter register
+           regs = modbusClient.read_holding_registers( address=0xF001, count=1, unit=UNIT )
+
+           if regs.isError():
+               log.error('regs.isError: '+str(regs))
+               sys.exit()
+           else:
+               decoder = BinaryPayloadDecoder.fromRegisters( regs.registers, byteorder=Endian.Big, wordorder=Endian.Little )
+               powerlimitRel= decoder.decode_16bit_uint() # SolarEdge relative power limit in %
+               dbusservice['pvinverter.pv0']['/Ac/ActivePowerLimit'] = powerlimitRel
+               powerlimit= int(maxPower * powerlimitRel / 100) # calculate absolute limit in W
+               dbusservice['pvinverter.pv0']['/Ac/PowerLimit'] = powerlimit # ESS dynamic zero feed-in power limit
+
     except:
-        log.error('exception in _update.')
+        log.error('exception in _update.',exc_info=1)
         sys.exit()
 
     return True
- 
+
+def _handleAdvancedPwrControlEn(path, value):
+    log.info("_handleAdvancedPwrControlEn(): someone else updated %s to %s" % (path, value))
+
+    try:
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_32bit_int( value )
+        # log.info("_handleAdvancedPwrControlEn(): registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF142, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+
+    except Exception as e:
+        log.error('Exception in _handleAdvancedPwrControlEn(): %s' % e )
+        sys.exit()
+
+    return True # accept the change
+
+def _handlePowerLimit(path, value):
+    if (maxPower==0):
+        log.warning('_handlePowerLimit(): maxPower is unknown, unable to set power limit')
+        return false;
+
+    # calculate relative value for SolarEdge
+    relVal=min(100,max(0,int(math.ceil(100 * value / maxPower))));
+    #log.info("_handlePowerLimit(): someone else updated %s to %s (%s)" % (path, value, relVal))
+
+    if ((relVal < 0) or (relVal > 100)):
+        log.warning('_handlePowerLimit(): value %s (%s) out of scope (0 <= value <= 100' % ( relVal, value) )
+        return False
+
+    try:
+        # Enable AdvancedPwrControl
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_32bit_int( 1 )
+        # log.info("_handleAdvancedPwrControlEn(): registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF142, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+            
+        # Write new Power Limit
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_16bit_uint( relVal )
+        # log.info("_handlePowerLimit(): write registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF001, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+
+        # Commit new Power Limit
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_16bit_int( 1 )
+        # log.info("_handlePowerLimit(): commit registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF100, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+
+
+    except Exception as e:
+        log.error('Exception in _handlePowerLimit(): %s' % e )
+        sys.exit()
+
+    return True # accept the change
+
+def _handleActivePowerLimit(path, value):
+    log.info("_handleActivePowerLimit(): someone else updated %s to %s" % (path, value))
+    if ((value < 0) or (value > 100)):
+        log.warning("_handleActivePowerLimit(): value out of scope (0 <= value <= 100" )
+        return False
+
+    try:
+        # Write new Active Power Limit
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_16bit_uint( value )
+        # log.info("_handleActivePowerLimit(): write registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF001, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+
+        # Commit new Active Power Limit
+        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
+        builder.add_16bit_int( 1 )
+        # log.info("_handleActivePowerLimit(): commit registers %s" % builder.to_registers() )
+        result = modbusClient.write_registers( address=0xF100, values=builder.to_registers(), unit=UNIT )
+
+        if result.isError():
+            log.error('result.isError(): '+str(result))
+
+
+    except Exception as e:
+        log.error('Exception in _handleActivePowerLimit(): %s' % e )
+        sys.exit()
+
+    return True # accept the change
+
+
 # Here is the bit you need to create multiple new services - try as much as possible timplement the Victron Dbus API requirements.
 def new_service(base, type, physical, id, instance):
     self =  VeDbusService("{}.{}.{}_id{:02d}".format(base, type, physical,  id), dbusconnection())
@@ -192,11 +344,12 @@ def new_service(base, type, physical, id, instance):
     self.add_path('/Connected', 1)  
     self.add_path('/HardwareVersion', 0)
 
-    _kwh = lambda p, v: (str(v) + 'kWh')
-    _a = lambda p, v: (str(v) + 'A')
-    _w = lambda p, v: (str(v) + 'W')
-    _v = lambda p, v: (str(v) + 'V')
+    _kwh = lambda p, v: (str(round(v,3)) + 'kWh')
+    _a = lambda p, v: (str(round(v,2)) + 'A')
+    _w = lambda p, v: (str(round(v,2)) + 'W')
+    _v = lambda p, v: (str(round(v,2)) + 'V')
     _c = lambda p, v: (str(v) + 'C')
+    _p = lambda p, v: (str(min(100,max(0,int(math.ceil(100 * v / maxPower))))) + '%') if maxPower>0 else 'null'
 
     # Create device type specific objects
     if physical == 'grid':
@@ -269,6 +422,9 @@ def new_service(base, type, physical, id, instance):
                 self.add_path('/ErrorCode', None)
                 self.add_path('/Position', 0)
                 self.add_path('/StatusCode', None)
+                self.add_path('/Ac/PowerLimit', value=None, description='ESS zero feed-in power limit in W', writeable=True, onchangecallback=_handlePowerLimit, gettextcallback=_w )
+                self.add_path('/Ac/AdvancedPwrControlEn', value=None, description='Enable SolarEdge power limitation', writeable=True, onchangecallback=_handleAdvancedPwrControlEn )
+                self.add_path('/Ac/ActivePowerLimit', value=None, description='SolarEdge active power limit in %', writeable=True, onchangecallback=_handleActivePowerLimit, gettextcallback=_p )
 
     if physical == 'temp_pvinverter':
         # if open() is ok, read register (modbus function 0x03)
@@ -313,7 +469,6 @@ def new_service(base, type, physical, id, instance):
                 self.add_path('/Type', 2, writeable=True)
                 self.add_path('/Alarm', None, writeable=True)
 
-
     return self
 
 dbusservice = {} # Dictonary to hold the multiple services
@@ -326,7 +481,7 @@ base = 'com.victronenergy'
 dbusservice['grid']           = new_service(base, 'grid',           'grid',              0, 0)
 dbusservice['pvinverter.pv0'] = new_service(base, 'pvinverter.pv0', 'pvinverter',        0, 20)
 dbusservice['adc-temp0']      = new_service(base, 'temperature',    'temp_pvinverter',   0, 26)
-dbusservice['digitalinput0']  = new_service(base, 'digitalinput',    'limit_pvinverter', 0, 10)
+dbusservice['digitalinput0']  = new_service(base, 'digitalinput',   'limit_pvinverter',  0, 10)
 
 # Everything done so just set a time to run an update function to update the data values every second.
 gobject.timeout_add(1000, _update)
