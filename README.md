@@ -1,4 +1,5 @@
 # dbus-solaredge Service
+
 Victron Venus integration for SolarEdge Inverters
 
 ### Purpose
@@ -10,9 +11,17 @@ The Python script cyclically reads data from the SolarEdge Inverter via Sunspec 
 ![Dashboard shows Energy flow](images/dashboard.png?raw=true "Dashboard")
 ![Menu shows Entries of the Inverter](images/menu.png?raw=true "Menu")
 
+A zero feed-in limit is also possible (as with the Fronius inverters): a limit can be configured via Settings / ESS / Grid feed-in, which is then dynamically adjusted so that only the corresponding power is fed in.
+
+![ESS Grid feed-in configuartion](images/ESS-limit-system-feed-in.png?raw=true "ESS configuration")
+![Current Limit for SolarEdge inverter](images/zero-feed-in-menu.png?raw=true "Current limit for SolarEdge inverter")
+
+If the value is set to zero (or a very low value), only the battery is charged and the demand from the household is covered - there is no further feed-in to the grid.
+![ESS Grid feed-in configuartion](images/zero-feed-in-curve.png?raw=true "Dashboard")
+
 ### Before Configuration
 
-Caution: There must be no other Modbus connection to the SolarEdge inverter. If the inverter is already connected in Venus OS with the Modbus functionality provided by Victron, this must be terminated beforehand! The SolarEdge supports only one TCP connection for Modbus and the data would also be redundant as the Python script also passes the data for the inverter to the Venus OS. But now you also get the gridmeter, which is not supported by Victron. 
+Caution: There must be no other Modbus connection to the SolarEdge inverter. If the inverter is already connected in Venus OS with the Modbus functionality provided by Victron, this must be terminated beforehand! The SolarEdge supports only one TCP connection for Modbus and the data would also be redundant as the Python script also passes the data for the inverter to the Venus OS. But now you also get the gridmeter, which is not supported by Victron.
 
 ### Configuration
 
@@ -22,8 +31,7 @@ You need to modify the settings in the dbus-solaredge.py as needed:
 
 `SERVER_PORT = 502`
 
-`UNIT = 2 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID` 
-
+`UNIT = 2 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID`
 
 ### Installation
 
@@ -38,11 +46,11 @@ You need to modify the settings in the dbus-solaredge.py as needed:
 
 3. Set permissions for files:
 
-  `chmod 755 /data/dbus-solaredge/service/run`
-  
-  `chmod 755 /data/dbus-solaredge/service/log/run`
-  
-  `chmod 744 /data/dbus-solaredge/kill_me.sh`
+`chmod 755 /data/dbus-solaredge/service/run`
+
+`chmod 755 /data/dbus-solaredge/service/log/run`
+
+`chmod 744 /data/dbus-solaredge/kill_me.sh`
 
 4. Add a symlink to for auto starting:
 
@@ -94,10 +102,9 @@ If you see something like:
 
 `2022-06-05 10:39:04,249 - DbusSolarEdge - ERROR - unable to connect to 192.168.178.80:502`
 
-Then you are not able to connect to your Inverter via Modbus. This can be a misconfiguration or another client is already connected. 
+Then you are not able to connect to your Inverter via Modbus. This can be a misconfiguration or another client is already connected.
 The inverter will accept only one concurrent client connected, if you need more than one client connection you may use a modbus proxy like
 https://pypi.org/project/modbus-proxy/
-
 
 #### Restart the script
 
@@ -115,7 +122,7 @@ In my installation at home, I am using the following Hardware:
 - SolarEdge Modbus Meter
 - 3x Victron MultiPlus-II - Battery Inverter (three phase)
 - Cerbo GX (tested Firmware version: v2.87 and v2.92)
-- DIY Battery 32x 280AH Lifepo EVE Cells with BMS from Batrium 
+- DIY Battery 32x 280AH Lifepo EVE Cells with BMS from Batrium
 
 ### Credits
 
