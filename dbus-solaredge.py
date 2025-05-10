@@ -182,12 +182,12 @@ def _update():
            sf = _get_scale_factor(regs.registers[35])
            dbusservice['adc-temp0']['/Temperature'] = round(regs.registers[32] * sf, 2)
 
-           if ((regs.registers[36] == 5) & (acpower > 100)):
-               dbusservice['digitalinput0']['/State'] = 3
-               dbusservice['digitalinput0']['/Alarm'] = 2
-           else:
-               dbusservice['digitalinput0']['/State'] = 2
-               dbusservice['digitalinput0']['/Alarm'] = 0
+           #if ((regs.registers[36] == 5) & (acpower > 100)):
+           #    dbusservice['digitalinput0']['/State'] = 3
+           #    dbusservice['digitalinput0']['/Alarm'] = 2
+           #else:
+           #    dbusservice['digitalinput0']['/State'] = 2
+           #    dbusservice['digitalinput0']['/Alarm'] = 0
 
            # Read AdvancedPwrControlEn
            regs = modbusClient.read_holding_registers( address=0xF142, count=2, unit=UNIT )
@@ -481,7 +481,9 @@ base = 'com.victronenergy'
 dbusservice['grid']           = new_service(base, 'grid',           'grid',              0, 0)
 dbusservice['pvinverter.pv0'] = new_service(base, 'pvinverter.pv0', 'pvinverter',        0, 20)
 dbusservice['adc-temp0']      = new_service(base, 'temperature',    'temp_pvinverter',   0, 26)
-dbusservice['digitalinput0']  = new_service(base, 'digitalinput',   'limit_pvinverter',  0, 10)
+
+# if you need dbus service for limit pvinverter, please enable the next line and also the code above which uses 'digitalinput0' to write registers
+# dbusservice['digitalinput0']  = new_service(base, 'digitalinput',   'limit_pvinverter',  0, 10)
 
 # Everything done so just set a time to run an update function to update the data values every second.
 gobject.timeout_add(1000, _update)
