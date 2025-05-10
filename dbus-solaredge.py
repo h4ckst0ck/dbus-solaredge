@@ -61,7 +61,7 @@ root.addHandler(handler)
 
 log.info('Startup, trying connection to Modbus-Server: '+ CONNECTION)
 
-modbusClient = ModbusClient(SERVER_HOST, port=SERVER_PORT ) 
+modbusClient = ModbusClient(SERVER_HOST, port=SERVER_PORT, retry_on_empty=True ) 
 
 modbusClient.auto_open=True
 
