@@ -1,0 +1,5 @@
+# Venus OS provides dbus-python, PyGObject, velib_python and pymodbus 2.x
+pymodbus==2.5.3
+pytest
+pytest-cov
+flake8

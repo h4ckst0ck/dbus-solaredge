@@ -1,0 +1,6 @@
+# Victron code style: PEP8, but tabs for indentation and max. 110 characters per line
+# https://github.com/victronenergy/velib_python#code-style
+[flake8]
+max-line-length = 110
+ignore = W191, E128, W503
+exclude = .git, __pycache__, venv
