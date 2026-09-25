@@ -185,3 +185,23 @@ def test_exits_on_device_instance_change(bus, driver):
 	set_value(bus, 'com.victronenergy.settings', '/Settings/Devices/solaredge_7E123456/ClassAndVrmInstance',
 		'pvinverter:21')
 	assert driver.wait(timeout=10) == 0
+
+
+def test_check(inverter, tmp_path):
+	"""The connection test used by setup.sh."""
+	config = tmp_path / 'config.ini'
+	config.write_text('[modbus]\nhost = 127.0.0.1\nport = %d\n' % inverter.port)
+	result = subprocess.run([sys.executable, str(ROOT / 'dbus-solaredge.py'), '-c', str(config), '--check'],
+		env=dict(os.environ, PYTHONPATH=VELIB), capture_output=True, text=True, timeout=30)
+	assert result.returncode == 0, result.stdout + result.stderr
+	assert 'inverter: SolarEdge SE10K, serial 7E123456' in result.stdout
+	assert 'meter:    SolarEdge SE-WND-3Y400-MB-K2, serial M1234' in result.stdout
+
+
+def test_check_unreachable(tmp_path):
+	config = tmp_path / 'config.ini'
+	config.write_text('[modbus]\nhost = 127.0.0.1\nport = 1\ntimeout = 0.5\n')
+	result = subprocess.run([sys.executable, str(ROOT / 'dbus-solaredge.py'), '-c', str(config), '--check'],
+		env=dict(os.environ, PYTHONPATH=VELIB), capture_output=True, text=True, timeout=30)
+	assert result.returncode == 1
+	assert 'unable to connect to 127.0.0.1:1' in result.stderr

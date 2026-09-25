@@ -51,25 +51,55 @@ Venus OS for this inverter (Settings -> PV inverters) and any other Modbus clien
 
 ## Installation
 
+Log in to the GX device as root (ssh) and run:
+
 ```sh
 wget -O /tmp/dbus-solaredge.zip https://github.com/h4ckst0ck/dbus-solaredge/archive/refs/heads/master.zip
 unzip /tmp/dbus-solaredge.zip -d /data
 mv /data/dbus-solaredge-master /data/dbus-solaredge
-/data/dbus-solaredge/install.sh
+/data/dbus-solaredge/setup.sh
 ```
 
-`install.sh` creates `config.ini` from `config.sample.ini`, links the service and adds itself to
-`/data/rc.local`, so the service is restored automatically after a firmware update. Adapt the configuration
-(at least `host` and `unit`) and restart the driver:
+`setup.sh` asks for the IP address, port and Modbus device id of the inverter, saves them in `config.ini`,
+tests the connection and installs the service:
 
-```sh
-vi /data/dbus-solaredge/config.ini
-/data/dbus-solaredge/restart.sh
 ```
+IP address of the SolarEdge inverter [192.168.178.80]: 192.168.1.50
+Modbus TCP port [502]:
+Modbus device id (SetApp: Communication -> RS485 -> SunSpec -> Device ID) [126]: 1
+Offer ESS zero feed-in power limit [yes]:
+saved to /data/dbus-solaredge/config.ini
+
+testing the connection to 192.168.1.50:502 unit 1 ...
+inverter: SolarEdge SE10K, serial 7E123456, firmware 0004.0018.0032, 3 phase(s), max power 10000.0 W
+meter:    SolarEdge SE-WND-3Y400-MB-K2, serial M1234
+
+dbus-solaredge installed, the service starts within a few seconds
+```
+
+Run `setup.sh` again to change the connection, it keeps all other options of `config.ini`. After editing
+`config.ini` manually, restart the driver with `/data/dbus-solaredge/restart.sh`.
 
 If the grid meter does not show up, configure the AC input of the Multi/Quattro as "Grid".
 
 To remove the driver run `/data/dbus-solaredge/uninstall.sh`.
+
+### Firmware updates
+
+A firmware update replaces the root filesystem of the GX device, `/data` is kept. The installation adds this
+line to `/data/rc.local`, which Venus OS runs at every boot:
+
+```sh
+[ -x /data/dbus-solaredge/install.sh ] && /data/dbus-solaredge/install.sh --boot
+```
+
+After an update it restores the service link, so the driver starts again. Nothing has to
+be done after an update. Venus OS only runs `/data/rc.local` when it is executable, `install.sh` takes care of
+that.
+
+On current Venus OS versions custom scripts can be switched off in Settings -> General -> Modification checks.
+Venus OS then renames `/data/rc.local` to `/data/rc.local.disabled` and the driver is not restored after an
+update until they are enabled again. `install.sh` shows a warning in this case.
 
 ## Configuration
 
@@ -89,6 +119,8 @@ To remove the driver run `/data/dbus-solaredge/uninstall.sh`.
 | driver | fail_timeout | 10 | Exit when the inverter is not reachable for this time (the service is restarted) |
 
 Host, port and unit can also be given on the command line, see `dbus-solaredge.py --help`.
+`dbus-solaredge.py --check` tests the connection and shows the inverter and meter (stop the service first,
+the inverter accepts only one connection).
 
 Device instance, custom name, PV inverter position and temperature type are stored in the Venus OS settings
 (`/Settings/Devices/solaredge_<serial>...`) and can be changed in the GUI.
@@ -110,7 +142,8 @@ the PV inverter publishes two SolarEdge specific paths, which can be written e.g
   instead of `com.victronenergy.pvinverter.pv0.pvinverter_id00`. The device instances (grid 0, PV inverter 20,
   temperature 26) stay the same, so the VRM history continues.
 - `kill_me.sh` is replaced by `restart.sh`.
-- Run `install.sh` once.
+- Run `setup.sh` once, it replaces the old service link in `/opt/victronenergy/service` which had to be
+  re-created manually after each firmware update.
 
 ## Troubleshooting
 
@@ -138,7 +171,7 @@ Code style as in all Victron projects: PEP8 with tabs, max. 110 characters per l
 ```sh
 pip install -r requirements-dev.txt
 flake8 .
-pytest                    # unit tests, 100 % line and branch coverage required
+pytest                    # unit and script tests, 100 % line and branch coverage required
 ```
 
 The integration tests run the driver on a real D-Bus with Victron's

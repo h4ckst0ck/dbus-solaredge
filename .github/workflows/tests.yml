@@ -14,7 +14,24 @@ jobs:
           python-version: '3.12'
       - run: pip install flake8
       - run: flake8 .
-      - run: sh -n install.sh uninstall.sh restart.sh service/run service/log/run
+      - run: for f in *.sh service/run service/log/run; do sh -n "$f"; done
+
+  scripts:
+    # install/setup scripts with the busybox shell and tools used by Venus OS
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y busybox-static
+      - run: pip install -r requirements-dev.txt
+      - run: |
+          mkdir -p /tmp/busybox
+          for applet in sh sed grep readlink dirname cat chmod cp ln rm mkdir printf head sleep pkill echo test '['; do
+            ln -s "$(command -v busybox)" "/tmp/busybox/$applet"
+          done
+      - run: SHELL_PATH=/tmp/busybox PATH=/tmp/busybox:$PATH pytest -p no:cacheprovider -o addopts= tests/test_scripts.py
 
   unit:
     # the Python version depends on the Venus OS version

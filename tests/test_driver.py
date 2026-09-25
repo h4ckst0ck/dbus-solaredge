@@ -399,3 +399,23 @@ def test_script_entry_point(monkeypatch, tmp_path):
 	with pytest.raises(SystemExit) as exit_info:
 		runpy.run_path(str(SCRIPT), run_name='__main__')
 	assert exit_info.value.code == 1
+
+
+# ---- --check ----
+def test_check(run_main, capsys):
+	code, clients, glib, watchdogs = run_main('--check')
+	assert code == 0
+	out = capsys.readouterr().out
+	assert ('inverter: SolarEdge SE10K, serial 7E123456, firmware 0004.0018.0032, 3 phase(s), '
+		'max power 10000.0 W') in out
+	assert 'meter:    SolarEdge SE-WND-3Y400-MB-K2, serial M1234' in out
+	assert clients[0].closed
+	assert glib.timers == []
+
+
+def test_check_error(run_main, monkeypatch, capsys):
+	monkeypatch.setattr(FakeModbusClient, 'read_holding_registers',
+		lambda self, address, count, unit: Response(error=True))
+	code, clients, glib, watchdogs = run_main('--check')
+	assert code == 1
+	assert 'error: reading 64 registers at 0x9C44 failed' in capsys.readouterr().out

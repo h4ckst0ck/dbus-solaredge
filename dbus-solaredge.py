@@ -195,6 +195,23 @@ class Driver(object):
 			self.on_exit()
 
 
+def check(config, client):
+	"""Read the device information once and print it, used by setup.sh to test the connection."""
+	modbus = solaredge.ModbusDevice(client, config.unit)
+	inverter = solaredge.Inverter(modbus)
+	meter = solaredge.Meter(modbus)
+	try:
+		info = inverter.read_info()
+		print('inverter: %s %s, serial %s, firmware %s, %d phase(s), max power %s W' % (info.manufacturer,
+			info.model, info.serial, info.version, inverter.phases, inverter.read_max_power()))
+		info = meter.read_info()
+		print('meter:    %s %s, serial %s' % (info.manufacturer, info.model, info.serial))
+	except Exception as e:
+		print('error: %s' % e)
+		return 1
+	return 0
+
+
 def parse_args(argv=None):
 	parser = argparse.ArgumentParser(description=__doc__)
 	parser.add_argument('-c', '--config', default=CONFIG_FILE, help='configuration file (default: %(default)s)')
@@ -202,6 +219,7 @@ def parse_args(argv=None):
 	parser.add_argument('--port', type=int, help='Modbus TCP port')
 	parser.add_argument('--unit', type=int, help='Modbus device id of the inverter')
 	parser.add_argument('-d', '--debug', action='store_true', help='enable debug logging')
+	parser.add_argument('--check', action='store_true', help='test the connection to the inverter and exit')
 	parser.add_argument('-V', '--version', action='version', version=VERSION)
 	return parser.parse_args(argv)
 
@@ -221,14 +239,18 @@ def main(argv=None):
 	log.info('%s v%s, connecting to %s:%d unit %d' % (services.PROCESS_NAME, VERSION, config.host, config.port,
 		config.unit))
 
-	threads_init()
-	DBusGMainLoop(set_as_default=True)
-	mainloop = GLib.MainLoop()
-
 	client = ModbusTcpClient(config.host, port=config.port, timeout=config.modbus_timeout)
 	if not client.connect():
 		log.error('unable to connect to %s:%d' % (config.host, config.port))
 		return 1
+	if args.check:
+		code = check(config, client)
+		client.close()
+		return code
+
+	threads_init()
+	DBusGMainLoop(set_as_default=True)
+	mainloop = GLib.MainLoop()
 
 	driver = Driver(config, client, settings_bus())
 	driver.on_exit = mainloop.quit
