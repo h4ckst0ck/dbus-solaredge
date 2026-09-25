@@ -5,12 +5,40 @@ on:
   pull_request:
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+      - run: pip install flake8
+      - run: flake8 .
+      - run: sh -n install.sh uninstall.sh restart.sh service/run service/log/run
+
+  unit:
+    # the Python version depends on the Venus OS version
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - run: pip install -r requirements-dev.txt
       - run: pytest
+
+  integration:
+    # real D-Bus with Victron's velib_python, current and end of 2022 (no deferred registration/itemtype)
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        velib: ['3368c073d92a7fd9d715228ee22ce1e72edeaa90', '8e8e19966ed51e182d2e7458d834ab0b32ad72d7']
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y dbus python3-dbus python3-gi python3-venv
+      - run: python3 -m venv --system-site-packages venv && venv/bin/pip install -r requirements-dev.txt
+      - run: git clone https://github.com/victronenergy/velib_python.git /tmp/velib_python && git -C /tmp/velib_python checkout ${{ matrix.velib }}
+      - run: VELIB_PYTHON=/tmp/velib_python venv/bin/python -m pytest --no-cov tests_integration

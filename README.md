@@ -1,149 +1,164 @@
-# dbus-solaredge Service
+# dbus-solaredge
 
-Victron Venus integration for SolarEdge Inverters
+Victron Venus OS driver for SolarEdge inverters and the SolarEdge energy meter.
 
-### Purpose
+The driver reads the inverter and the meter connected to it via SunSpec Modbus TCP and publishes them on the
+Venus OS D-Bus, following the [Venus OS D-Bus API](https://github.com/victronenergy/venus/wiki/dbus-api):
 
-This service is meant to be run on a raspberry Pi with Venus OS from Victron or a for example a Cerbo GX device.
+| Service | Content |
+| --- | --- |
+| `com.victronenergy.grid` | SolarEdge energy meter as grid meter (power, voltage, current, energy per phase) |
+| `com.victronenergy.pvinverter` | PV inverter including the ESS zero feed-in power limit |
+| `com.victronenergy.temperature` | Heat sink temperature of the inverter |
+| `com.victronenergy.digitalinput` | Optional: active while the inverter is throttled |
 
-The Python script cyclically reads data from the SolarEdge Inverter via Sunspec Modbus and publishes information on the dbus, using the services com.victronenergy.grid, com.victronenergy.pvinverter.pv0, com.victronenergy.temperature and optionally com.victronenergy.digitalinput. This makes the Venus OS work as if you had a physical Victron Grid Meter installed and gives all information about PV Intervter load, temperature and if the inverter is in limit mode.
+This makes the GX device work as if a Victron grid meter was installed, which is not possible with the
+built-in SolarEdge support of Venus OS.
 
 ![Dashboard shows Energy flow](images/dashboard.png?raw=true "Dashboard")
 ![Menu shows Entries of the Inverter](images/menu.png?raw=true "Menu")
 
-A zero feed-in limit is also possible (as with the Fronius inverters): a limit can be configured via Settings / ESS / Grid feed-in, which is then dynamically adjusted so that only the corresponding power is fed in.
+## ESS zero feed-in
+
+The inverter output can be limited by ESS (Settings -> ESS -> Grid feed-in), the same way as for Fronius
+inverters. If the limit is set to zero (or a very low value), the PV power only charges the battery and
+covers the consumption, nothing is fed into the grid.
 
 ![ESS Grid feed-in configuartion](images/ESS-limit-system-feed-in.png?raw=true "ESS configuration")
 ![Current Limit for SolarEdge inverter](images/zero-feed-in-menu.png?raw=true "Current limit for SolarEdge inverter")
+![Zero feed-in](images/zero-feed-in-curve.png?raw=true "Dashboard")
 
-If the value is set to zero (or a very low value), only the battery is charged and the demand from the household is covered - there is no further feed-in to the grid.
-![ESS Grid feed-in configuartion](images/zero-feed-in-curve.png?raw=true "Dashboard")
+The limit uses the SolarEdge *Enhanced Dynamic Power Control*, like the SolarEdge limiter of Victron's own
+[dbus-fronius](https://github.com/victronenergy/dbus-fronius/blob/master/software/src/solaredge_limiter.cpp):
 
-### Before Configuration
+- the limit is written to the dynamic register `0xF322`, which is not stored in the flash of the inverter
+- the limit is a percentage with decimals, not 1 % steps
+- when the inverter receives no new limit within `power_limit_timeout` (120 s), it falls back to 100 %,
+  so a crashed driver or GX device never leaves the inverter throttled
+- when ESS does not refresh the limit within half of that time, the driver removes it
 
-Caution: There must be no other Modbus connection to the SolarEdge inverter. If the inverter is already connected in Venus OS with the Modbus functionality provided by Victron, this must be terminated beforehand! The SolarEdge supports only one TCP connection for Modbus and the data would also be redundant as the Python script also passes the data for the inverter to the Venus OS. But now you also get the gridmeter, which is not supported by Victron.
+## Requirements
 
-### Configuration
+- Venus OS on a GX device (Cerbo GX, Raspberry Pi, ...), root access enabled
+  ([instructions](https://www.victronenergy.com/live/ccgx:root_access))
+- SolarEdge inverter with Modbus TCP enabled in SetApp (Communication -> LAN / Modbus TCP),
+  see the [Victron guide](https://www.victronenergy.com/live/venus-os:gx_solaredge)
+- optional: SolarEdge energy meter connected to the inverter
 
-You need to modify the settings at the top of dbus-solaredge.py as needed:
+The inverter accepts only **one** Modbus TCP connection. Disable the SolarEdge / Modbus TCP support of
+Venus OS for this inverter (Settings -> PV inverters) and any other Modbus client, or use a Modbus proxy like
+[modbus-proxy](https://pypi.org/project/modbus-proxy/).
 
-`SERVER_HOST = "192.168.178.80"`
+## Installation
 
-`SERVER_PORT = 502`
-
-`UNIT = 126 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID`
-
-Optional settings:
-
-- `MAX_POWER = 0` - max power of the inverter in W. With 0 it is read from the inverter; set a fixed value (e.g. 25000 for a SE25K) if that does not work.
-- `ENABLE_LIMIT_INPUT = False` - set to True to publish a digital input (com.victronenergy.digitalinput) which signals when the inverter is throttled.
-
-Host, port, unit and max power can also be passed on the command line, e.g. `python3 dbus-solaredge.py --host 192.168.1.50 --unit 1` (see `--help`).
-
-### Installation
-
-1. You need root access to your GX Device (https://www.victronenergy.com/live/ccgx:root_access)
-
-2. Copy the files to the /data folder on your venus:
-
-   - /data/dbus-solaredge/dbus-solaredge.py
-   - /data/dbus-solaredge/kill_me.sh
-   - /data/dbus-solaredge/service/run
-   - /data/dbus-solaredge/service/log/run
-
-3. Set permissions for files:
-
-`chmod 755 /data/dbus-solaredge/service/run`
-
-`chmod 755 /data/dbus-solaredge/service/log/run`
-
-`chmod 744 /data/dbus-solaredge/kill_me.sh`
-
-4. Add a symlink to for auto starting:
-
-   `ln -s /data/dbus-solaredge/service/ /opt/victronenergy/service/dbus-solaredge`
-
-   The supervisor should automatically start this service within seconds, if not simply reboot your system.
-
-5. If the gridmeter does not show up in the console, please ensure you have configured AC-In as "Grid" see (https://community.victronenergy.com/questions/82440/multiplus-vrm-system-overview-ac-input-not-availab.html)
-
-### Upgrading Venus OS
-
-If you are upgrading your Venus OS you will have to re-add the symlink for autostarting the python script (Repeat step 4 from the above installation instructions).
-
-### Debugging
-
-You can check the status of the service with svstat:
-
-`svstat /service/dbus-solaredge`
-
-It will show something like this:
-
-`/service/dbus-solaredge: up (pid 8179) 746 seconds`
-
-If the number of seconds is always 0 or 1 or any other small number, it means that the service crashes and gets restarted all the time.
-
-You could also take a look at the log-file:
-
-`tail -f /var/log/dbus-solaredge/current`
-
-and see if there are any error messages.
-
-Short Modbus errors are logged and retried. After 30 failed update cycles in a row the script exits and is restarted by the supervisor. While the inverter is not reachable `/Connected` of the services is set to 0.
-
-When you think that the script crashes, start it directly from the command line:
-
-`python3 /data/dbus-solaredge/dbus-solaredge.py`
-
-and see if it throws any error messages.
-
-If the script stops with the message
-
-`dbus.exceptions.NameExistsException: Bus name already exists: com.victronenergy.grid"`
-
-it means that the service is still running or another service is using that bus name.
-
-If you see something like:
-
-`2022-06-05 10:39:04,238 - DbusSolarEdge - INFO - Startup, trying connection to Modbus-Server: ModbusTCP 192.168.178.80:502, UNIT 2`
-
-`2022-06-05 10:39:04,247 - pymodbus.client.sync - ERROR - Connection to (192.168.178.80, 502) failed: [Errno 111] Connection refused`
-
-`2022-06-05 10:39:04,249 - DbusSolarEdge - ERROR - unable to connect to 192.168.178.80:502`
-
-Then you are not able to connect to your Inverter via Modbus. This can be a misconfiguration or another client is already connected.
-The inverter will accept only one concurrent client connected, if you need more than one client connection you may use a modbus proxy like
-https://pypi.org/project/modbus-proxy/
-
-#### Restart the script
-
-If you want to restart the script, for example after changing it, just run the following command:
-
-`/data/dbus-solaredge/kill_me.sh`
-
-The supervisor will restart the script within a few seconds.
-
-### Tests
-
-The tests run on any machine, Venus OS is not needed (dbus, GLib and vedbus are replaced by stubs, the inverter by a fake Modbus client):
-
+```sh
+wget -O /tmp/dbus-solaredge.zip https://github.com/h4ckst0ck/dbus-solaredge/archive/refs/heads/master.zip
+unzip /tmp/dbus-solaredge.zip -d /data
+mv /data/dbus-solaredge-master /data/dbus-solaredge
+/data/dbus-solaredge/install.sh
 ```
+
+`install.sh` creates `config.ini` from `config.sample.ini`, links the service and adds itself to
+`/data/rc.local`, so the service is restored automatically after a firmware update. Adapt the configuration
+(at least `host` and `unit`) and restart the driver:
+
+```sh
+vi /data/dbus-solaredge/config.ini
+/data/dbus-solaredge/restart.sh
+```
+
+If the grid meter does not show up, configure the AC input of the Multi/Quattro as "Grid".
+
+To remove the driver run `/data/dbus-solaredge/uninstall.sh`.
+
+## Configuration
+
+`config.ini` (all options are optional, see `config.sample.ini`):
+
+| Section | Option | Default | Description |
+| --- | --- | --- | --- |
+| modbus | host | 192.168.178.80 | IP address of the inverter |
+| modbus | port | 502 | Modbus TCP port |
+| modbus | unit | 126 | Modbus device id (SetApp: Communication -> RS485 -> Protocol -> SunSpec -> Device ID) |
+| modbus | timeout | 2.0 | Timeout of one Modbus request in seconds |
+| inverter | max_power | 0 | Max power in W, 0 = read from the inverter |
+| inverter | power_limit | yes | Offer the ESS zero feed-in power limit |
+| inverter | power_limit_timeout | 120 | Fallback of the inverter to 100 % after this time without new limit (30 - 600 s) |
+| inverter | throttle_input | no | Publish the digital input "PV inverter throttled" |
+| driver | update_interval | 1.0 | Update interval in seconds |
+| driver | fail_timeout | 10 | Exit when the inverter is not reachable for this time (the service is restarted) |
+
+Host, port and unit can also be given on the command line, see `dbus-solaredge.py --help`.
+
+Device instance, custom name, PV inverter position and temperature type are stored in the Venus OS settings
+(`/Settings/Devices/solaredge_<serial>...`) and can be changed in the GUI.
+
+## D-Bus paths
+
+Besides the paths of the [D-Bus API](https://github.com/victronenergy/venus/wiki/dbus) for the service types,
+the PV inverter publishes two SolarEdge specific paths, which can be written e.g. via MQTT:
+
+| Path | Description |
+| --- | --- |
+| `/Ac/AdvancedPwrControlEn` | SolarEdge advanced power control (register 0xF142), 0 or 1 |
+| `/Ac/ActivePowerLimit` | SolarEdge active power limit in % (register 0xF001), 0 - 100 |
+
+## Upgrading from version 0.x
+
+- The configuration moved from `dbus-solaredge.py` to `config.ini`.
+- The D-Bus service names contain the serial number now, e.g. `com.victronenergy.pvinverter.solaredge_7E123456`
+  instead of `com.victronenergy.pvinverter.pv0.pvinverter_id00`. The device instances (grid 0, PV inverter 20,
+  temperature 26) stay the same, so the VRM history continues.
+- `kill_me.sh` is replaced by `restart.sh`.
+- Run `install.sh` once.
+
+## Troubleshooting
+
+```sh
+svstat /service/dbus-solaredge                         # up since how many seconds?
+tail -F /var/log/dbus-solaredge/current | tai64nlocal  # log
+python3 /data/dbus-solaredge/dbus-solaredge.py -d      # run manually with debug output (stop the service first)
+```
+
+If the service is always up for only a few seconds it keeps restarting, the log shows why. A message like
+`unable to connect to 192.168.178.80:502` means the inverter is not reachable or another client is connected.
+
+## Development
+
+| File | Content |
+| --- | --- |
+| `dbus-solaredge.py` | Entry point: configuration, main loop, watchdog, driver |
+| `solaredge.py` | Modbus access to inverter and meter, power limiter (no D-Bus) |
+| `services.py` | D-Bus services (grid, pvinverter, temperature, digitalinput) |
+| `sunspec.py` | Decoding of SunSpec registers |
+| `sunspec.txt` | SunSpec register map of SolarEdge |
+
+Code style as in all Victron projects: PEP8 with tabs, max. 110 characters per line (`flake8`).
+
+```sh
 pip install -r requirements-dev.txt
-pytest
+flake8 .
+pytest                    # unit tests, 100 % line and branch coverage required
 ```
 
-The test run fails if the coverage of dbus-solaredge.py drops below 100 % (lines and branches).
+The integration tests run the driver on a real D-Bus with Victron's
+[velib_python](https://github.com/victronenergy/velib_python), a simulated inverter (Modbus TCP server) and a
+minimal localsettings service. They need `dbus-daemon`, dbus-python and PyGObject:
 
-### Hardware
+```sh
+git clone https://github.com/victronenergy/velib_python /tmp/velib_python
+VELIB_PYTHON=/tmp/velib_python pytest --no-cov tests_integration
+```
 
-In my installation at home, I am using the following Hardware:
+## Hardware
 
-- SolarEdge SE16K
-- SolarEdge Modbus Meter
-- 3x Victron MultiPlus-II - Battery Inverter (three phase)
-- Cerbo GX (tested Firmware version: v2.87 and v2.92)
-- DIY Battery 32x 280AH Lifepo EVE Cells with BMS from Batrium
+Installation of the original author (version 0.x):
 
-### Credits
+- SolarEdge SE16K with SolarEdge Modbus Meter
+- 3x Victron MultiPlus-II (three phase), Cerbo GX
 
-I have shamelessly copied and adapted the code from https://github.com/RalfZim/venus.dbus-fronius-smartmeter and the readme as well as the code from Paul1974 https://www.photovoltaikforum.com/thread/161496-solaredge-smartmeter-mit-victron/?pageNo=1
+## Credits
+
+Based on https://github.com/RalfZim/venus.dbus-fronius-smartmeter and the code of Paul1974 in
+https://www.photovoltaikforum.com/thread/161496-solaredge-smartmeter-mit-victron/?pageNo=1.
+The ESS zero feed-in was added by [irudi](https://github.com/irudi).

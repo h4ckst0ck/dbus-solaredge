@@ -1,102 +1,416 @@
 import pytest
 
-from conftest import FakeModbusClient, string_regs
+import services
+import solaredge
+from conftest import INVERTER_INFO, METER_INFO, LegacyVeDbusService, SettingsDevice
 
 
-def test_service_names_and_instances(bridge):
-    services = bridge.services
-    assert sorted(services) == ['grid', 'pv', 'temp']
-    assert services['grid'].servicename == 'com.victronenergy.grid.grid_id00'
-    assert services['pv'].servicename == 'com.victronenergy.pvinverter.pv0.pvinverter_id00'
-    assert services['temp'].servicename == 'com.victronenergy.temperature.temp_pvinverter_id00'
-    assert [services[s]['/DeviceInstance'] for s in ('grid', 'pv', 'temp')] == [0, 20, 26]
-    assert [services[s]['/ProductId'] for s in ('grid', 'pv', 'temp')] == [16, 41284, 0]
+class Restart(object):
+	def __init__(self):
+		self.count = 0
+
+	def __call__(self):
+		self.count += 1
 
 
-def test_common_paths(se, bridge):
-    for service in bridge.services.values():
-        assert service['/Connected'] == 1
-        assert service['/Mgmt/Connection'] == 'ModbusTCP test:502, UNIT 126'
-        assert service['/Mgmt/ProcessVersion'].startswith(se.VERSION + ' on Python ')
-        assert service['/DataManagerVersion'] == se.VERSION
+@pytest.fixture
+def restart():
+	return Restart()
 
 
-def test_device_strings(bridge):
-    pv = bridge.services['pv']
-    assert pv['/ProductName'] == 'SolarEdge SE10K'
-    assert pv['/FirmwareVersion'] == '0004.0018.0032'
-    assert pv['/Serial'] == '7E123456'
-
-    grid = bridge.services['grid']
-    assert grid['/ProductName'] == 'SolarEdge SE-WND-3Y400-MB-K2'
-    assert grid['/FirmwareVersion'] == '2.3'
-    assert grid['/Serial'] == 'M1234'
-    assert grid['/CustomName'] == 'Grid meter Export+Import'
+def common(restart):
+	return dict(connection='Modbus TCP 1.2.3.4:502 unit 126', version='1.0.0', settings_bus='bus',
+		on_restart=restart)
 
 
-
-@pytest.mark.parametrize('address', [40004, 40123])
-def test_device_strings_use_full_register_range(se, client, address):
-    # every field completely filled, the last character of each field must not be cut off
-    client.load(address, string_regs('M' * 32, 16) + string_regs('D' * 32, 16) + string_regs('O' * 16, 8)
-                + string_regs('V' * 16, 8) + string_regs('S' * 32, 16))
-    bridge = se.SolarEdge(client, 126, 'test')
-    bridge.create_services()
-    service = bridge.services['pv' if address == 40004 else 'grid']
-    assert service['/ProductName'] == 'M' * 32 + ' ' + 'D' * 32
-    assert service['/FirmwareVersion'] == 'V' * 16
-    assert service['/Serial'] == 'S' * 32
-
-def test_temperature_service(bridge):
-    temp = bridge.services['temp']
-    assert temp['/CustomName'] == 'PV Inverter Temperature'
-    assert temp['/TemperatureType'] == 2
-    assert temp.writeable['/TemperatureType']
+def inverter_reading(power=9000, status=solaredge.STATUS_MPPT, phases=3, temperature=45.2):
+	phase = solaredge.PhaseReading(10.0, 230.0, power and power / phases, 100.0 / phases, None)
+	return solaredge.InverterReading(power, 100.0, [phase] * phases, status, 0, temperature)
 
 
-def test_writeable_paths(bridge):
-    pv = bridge.services['pv']
-    writeable = sorted(path for path, flag in pv.writeable.items() if flag)
-    assert writeable == ['/Ac/ActivePowerLimit', '/Ac/AdvancedPwrControlEn', '/Ac/PowerLimit']
+class FakeLimiter(object):
+	def __init__(self):
+		self.limits = []
+		self.error = False
+		self.is_expired = False
+		self.resets = 0
+
+	def set_limit(self, watts):
+		if self.error:
+			raise solaredge.ModbusError('write failed')
+		self.limits.append(watts)
+		return watts
+
+	def expired(self):
+		return self.is_expired
+
+	def reset(self):
+		self.resets += 1
+		self.is_expired = False
+		return 10000.0
 
 
-@pytest.mark.parametrize('phases', [1, 2, 3])
-def test_phase_count_from_sunspec_model(se, phases):
-    bridge = se.SolarEdge(FakeModbusClient(phases), 126, 'test')
-    bridge.create_services()
-    assert bridge.phases == phases
+class FakeInverter(object):
+	def __init__(self):
+		self.calls = []
+		self.error = False
+
+	def write_advanced_power_control(self, enabled):
+		self._call('adv', enabled)
+
+	def write_active_power_limit(self, percent):
+		self._call('limit', percent)
+
+	def _call(self, name, value):
+		if self.error:
+			raise solaredge.ModbusError('write failed')
+		self.calls.append((name, value))
 
 
-def test_unknown_model_defaults_to_three_phases(se, client):
-    client.load(40069, [0xFFFF])
-    bridge = se.SolarEdge(client, 126, 'test')
-    bridge.create_services()
-    assert bridge.phases == 3
+def make_pv(restart, limiter=None, max_power=10000.0, inverter=None):
+	return services.PvInverter('solaredge_7E123456', INVERTER_INFO, inverter=inverter or FakeInverter(),
+		max_power=max_power, limiter=limiter, **common(restart))
 
 
-def test_limit_input_service_disabled_by_default(bridge):
-    assert 'limit' not in bridge.services
+# ---- helpers ----
+def test_make_ident():
+	assert services.make_ident('solaredge', '7E-12.3 4') == 'solaredge_7E_12_3_4'
+	assert services.make_ident('solaredge', 'meter', '') == 'solaredge_meter'
 
 
-def test_limit_input_service(se, client, monkeypatch):
-    monkeypatch.setattr(se, 'ENABLE_LIMIT_INPUT', True)
-    bridge = se.SolarEdge(client, 126, 'test')
-    bridge.create_services()
-    limit = bridge.services['limit']
-    assert limit.servicename == 'com.victronenergy.digitalinput.limit_pvinverter_id00'
-    assert limit['/DeviceInstance'] == 10
-    assert limit['/Type'] == 2
+def test_private_bus(monkeypatch):
+	monkeypatch.delenv('DBUS_SESSION_BUS_ADDRESS', raising=False)
+	assert services.private_bus().address == 'system'
+	monkeypatch.setenv('DBUS_SESSION_BUS_ADDRESS', 'unix:path=/tmp/bus')
+	assert services.private_bus().address == 'unix:path=/tmp/bus'
 
 
-def test_fixed_max_power_is_logged(se, client, caplog):
-    caplog.set_level('INFO')
-    bridge = se.SolarEdge(client, 126, 'test', max_power=25000)
-    bridge.create_services()
-    assert 'maxPower manually set to 25000 W' in caplog.text
+def test_text():
+	assert services._w('/p', 12.345) == '12.35W'
+	assert services._kwh('/p', 1.23456) == '1.235kWh'
+	assert services._c('/p', -5.24) == '-5.2C'
+	assert services._pct('/p', 80) == '80%'
 
 
-def test_create_services_fails_on_read_error(se, client):
-    client.read_error = True
-    bridge = se.SolarEdge(client, 126, 'test')
-    with pytest.raises(se.ModbusError):
-        bridge.create_services()
+def test_refreshable_item_calls_callback_for_same_value():
+	calls = []
+	item = services.RefreshableItem(5, True, lambda p, v: calls.append(v) or True, None)
+	assert item.SetValue('/p', 5) == 0
+	assert calls == [5]
+
+
+@pytest.mark.parametrize('status, code', [
+	(solaredge.STATUS_OFF, 0), (solaredge.STATUS_SLEEPING, 8), (solaredge.STATUS_STARTING, 3),
+	(solaredge.STATUS_MPPT, 11), (solaredge.STATUS_THROTTLED, 12), (solaredge.STATUS_SHUTTING_DOWN, 8),
+	(solaredge.STATUS_FAULT, 10), (solaredge.STATUS_STANDBY, 8), (99, None),
+])
+def test_status_code(restart, status, code):
+	pv = make_pv(restart)
+	pv.update(services.PvInverterReading(inverter_reading(status=status), 1, 100))
+	assert pv.service['/StatusCode'] == code
+
+
+# ---- DbusDevice ----
+def test_mandatory_paths(restart):
+	grid = services.GridMeter('solaredge_meter_M1234', METER_INFO, **common(restart))
+	s = grid.service
+	assert s.name == 'com.victronenergy.grid.solaredge_meter_M1234'
+	assert s['/Mgmt/ProcessName'] == 'dbus-solaredge'
+	assert s['/Mgmt/ProcessVersion'] == '1.0.0'
+	assert s['/Mgmt/Connection'] == 'Modbus TCP 1.2.3.4:502 unit 126'
+	assert s['/DeviceInstance'] == 0
+	assert s['/ProductId'] == services.PRODUCT_ID_UNKNOWN
+	assert s['/ProductName'] == 'SolarEdge SE-WND-3Y400-MB-K2'
+	assert s['/FirmwareVersion'] == '2.3'
+	assert s['/HardwareVersion'] is None
+	assert s['/Serial'] == 'M1234'
+	assert s['/Connected'] == 1
+	assert s['/CustomName'] == ''
+
+
+def test_registered_only_after_register(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	assert not grid.service.registered
+	grid.register()
+	assert grid.service.registered
+
+
+def test_legacy_velib_registers_immediately(restart, legacy_velib):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	assert isinstance(grid.service, LegacyVeDbusService)
+	assert grid.service.registered
+	grid.register()  # nothing left to do
+
+
+def test_private_bus_per_service(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	pv = make_pv(restart)
+	assert grid.service.bus is not pv.service.bus
+
+
+def test_device_instance_from_localsettings(restart):
+	SettingsDevice.stored['/Settings/Devices/meter/ClassAndVrmInstance'] = 'grid:31'
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	assert grid.instance == 31
+	assert grid.service['/DeviceInstance'] == 31
+
+
+def test_default_device_instances(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	pv = make_pv(restart)
+	temp = services.InverterTemperature('temp', INVERTER_INFO, **common(restart))
+	throttle = services.ThrottleInput('throttle', INVERTER_INFO, **common(restart))
+	stored = SettingsDevice.stored
+	assert stored['/Settings/Devices/meter/ClassAndVrmInstance'] == 'grid:0'
+	assert stored['/Settings/Devices/solaredge_7E123456/ClassAndVrmInstance'] == 'pvinverter:20'
+	assert stored['/Settings/Devices/temp/ClassAndVrmInstance'] == 'temperature:26'
+	assert stored['/Settings/Devices/throttle/ClassAndVrmInstance'] == 'digitalinput:10'
+	assert [d.instance for d in (grid, pv, temp, throttle)] == [0, 20, 26, 10]
+
+
+@pytest.mark.parametrize('value', ['garbage', 'grid:x', None])
+def test_invalid_device_instance_is_reset(restart, value):
+	SettingsDevice.stored['/Settings/Devices/meter/ClassAndVrmInstance'] = value
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	assert grid.instance == 0
+	assert SettingsDevice.stored['/Settings/Devices/meter/ClassAndVrmInstance'] == 'grid:0'
+	assert restart.count == 0
+
+
+def test_instance_change_restarts(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	grid.settings.change('instance', 'grid:0')
+	assert restart.count == 0
+	grid.settings.change('instance', 'grid:5')
+	assert restart.count == 1
+	grid.settings.change('instance', 'invalid')
+	assert restart.count == 2
+
+
+def test_custom_name_is_stored(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	assert grid.service.set_value('/CustomName', 'Hausanschluss') == 0
+	assert SettingsDevice.stored['/Settings/Devices/meter/CustomName'] == 'Hausanschluss'
+	assert grid.service.set_value('/CustomName', 5) == 2
+
+
+def test_setting_changed_by_gui_updates_path(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	grid.settings.change('customname', 'from gui')
+	assert grid.service['/CustomName'] == 'from gui'
+
+
+def test_unknown_setting_change_is_ignored(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	grid._setting_changed('other', 1, 2)
+
+
+def test_publish_is_abstract(restart):
+	device = services.DbusDevice.__new__(services.DbusDevice)
+	with pytest.raises(NotImplementedError):
+		device.publish(None, None)
+
+
+def test_update_sends_one_items_changed(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	grid.update(_meter_reading())
+	assert grid.service.items_changed == 1
+
+
+def _meter_reading():
+	phase = solaredge.PhaseReading(-5.0, 230.0, 1500, 4.0, 1.0)
+	return solaredge.MeterReading(3000, 65.536, 6.0, [phase, phase, phase])
+
+
+# ---- GridMeter ----
+def test_grid_meter(restart):
+	grid = services.GridMeter('meter', METER_INFO, **common(restart))
+	grid.update(_meter_reading())
+	s = grid.service
+	assert s['/Ac/Power'] == 3000
+	assert s['/Ac/Energy/Forward'] == 65.536
+	assert s['/Ac/Energy/Reverse'] == 6.0
+	for phase in ('L1', 'L2', 'L3'):
+		assert s['/Ac/%s/Current' % phase] == -5.0
+		assert s['/Ac/%s/Voltage' % phase] == 230.0
+		assert s['/Ac/%s/Power' % phase] == 1500
+		assert s['/Ac/%s/Energy/Forward' % phase] == 4.0
+		assert s['/Ac/%s/Energy/Reverse' % phase] == 1.0
+	assert s['/ErrorCode'] == 0
+	assert s.text('/Ac/Power') == '3000W'
+
+
+# ---- PvInverter ----
+def test_pv_inverter_paths(restart):
+	pv = make_pv(restart, limiter=FakeLimiter())
+	pv.update(services.PvInverterReading(inverter_reading(), 1, 80))
+	s = pv.service
+	assert s.name == 'com.victronenergy.pvinverter.solaredge_7E123456'
+	assert s['/ProductId'] == 0xA146
+	assert s['/Ac/Power'] == 9000
+	assert s['/Ac/Energy/Forward'] == 100.0
+	assert [s['/Ac/L%d/Power' % i] for i in (1, 2, 3)] == [3000] * 3
+	assert [s['/Ac/L%d/Current' % i] for i in (1, 2, 3)] == [10.0] * 3
+	assert [s['/Ac/L%d/Voltage' % i] for i in (1, 2, 3)] == [230.0] * 3
+	assert s['/Ac/L1/Energy/Forward'] == pytest.approx(100 / 3.0)
+	assert s['/Ac/MaxPower'] == 10000.0
+	assert s['/Ac/PowerLimit'] == 10000.0
+	assert s['/ErrorCode'] == 0
+	assert s['/Position'] == 0
+	assert s['/PositionIsAdjustable'] == 1
+	assert s['/Ac/AdvancedPwrControlEn'] == 1
+	assert s['/Ac/ActivePowerLimit'] == 80
+	assert s.text('/Ac/ActivePowerLimit') == '80%'
+
+
+def test_pv_inverter_single_phase(restart):
+	pv = make_pv(restart)
+	pv.update(services.PvInverterReading(inverter_reading(phases=1), 1, 100))
+	s = pv.service
+	assert s['/Ac/L1/Power'] == 9000
+	unused = ['/Ac/L2/Power', '/Ac/L3/Current', '/Ac/L3/Voltage', '/Ac/L2/Energy/Forward']
+	assert [s[path] for path in unused] == [None] * 4
+
+
+def test_pv_inverter_unknown_max_power(restart):
+	pv = make_pv(restart, max_power=0)
+	assert pv.service['/Ac/MaxPower'] is None
+
+
+def test_position_setting(restart):
+	pv = make_pv(restart)
+	assert pv.service.set_value('/Position', 1) == 0
+	assert SettingsDevice.stored['/Settings/Devices/solaredge_7E123456/Position'] == 1
+	assert pv.service.set_value('/Position', 3) == 2
+	assert pv.service.set_value('/Position', 'x') == 2
+	assert pv.service['/Position'] == 1
+
+
+# power limit (ESS zero feed-in)
+def test_no_power_limit_path_without_limiter(restart):
+	pv = make_pv(restart)
+	assert '/Ac/PowerLimit' not in pv.service
+	pv.check_power_limit()
+
+
+def test_set_power_limit(restart):
+	limiter = FakeLimiter()
+	pv = make_pv(restart, limiter)
+	assert pv.service.set_value('/Ac/PowerLimit', 2345) == 0
+	assert pv.service['/Ac/PowerLimit'] == 2345
+	assert limiter.limits == [2345.0]
+
+
+def test_power_limit_refresh_with_same_value(restart):
+	limiter = FakeLimiter()
+	pv = make_pv(restart, limiter)
+	pv.service.set_value('/Ac/PowerLimit', 2345)
+	pv.service.set_value('/Ac/PowerLimit', 2345)
+	assert limiter.limits == [2345.0, 2345.0]
+
+
+def test_power_limit_without_itemtype_support(restart, legacy_velib):
+	limiter = FakeLimiter()
+	pv = make_pv(restart, limiter)
+	pv.service.set_value('/Ac/PowerLimit', 2345)
+	pv.service.set_value('/Ac/PowerLimit', 2345)
+	assert limiter.limits == [2345.0]
+
+
+@pytest.mark.parametrize('value', [None, 'abc', float('nan')])
+def test_invalid_power_limit(restart, value):
+	limiter = FakeLimiter()
+	pv = make_pv(restart, limiter)
+	assert pv.service.set_value('/Ac/PowerLimit', value) == 2
+	assert limiter.limits == []
+
+
+def test_power_limit_write_error(restart, caplog):
+	limiter = FakeLimiter()
+	limiter.error = True
+	pv = make_pv(restart, limiter)
+	assert pv.service.set_value('/Ac/PowerLimit', 1000) == 2
+	assert pv.service['/Ac/PowerLimit'] == 10000.0
+	assert 'setting power limit failed' in caplog.text
+
+
+def test_power_limit_expiry(restart):
+	limiter = FakeLimiter()
+	pv = make_pv(restart, limiter)
+	pv.service.set_value('/Ac/PowerLimit', 1000)
+	pv.check_power_limit()
+	assert limiter.resets == 0
+	limiter.is_expired = True
+	pv.check_power_limit()
+	assert limiter.resets == 1
+	assert pv.service['/Ac/PowerLimit'] == 10000.0
+
+
+# SolarEdge extension paths
+@pytest.mark.parametrize('value, expected', [(0, False), (1, True), (1.0, True)])
+def test_advanced_power_control(restart, value, expected):
+	inverter = FakeInverter()
+	pv = make_pv(restart, inverter=inverter)
+	assert pv.service.set_value('/Ac/AdvancedPwrControlEn', value) == 0
+	assert inverter.calls == [('adv', expected)]
+
+
+@pytest.mark.parametrize('value', [2, -1, 0.5, 'on'])
+def test_advanced_power_control_invalid(restart, value):
+	inverter = FakeInverter()
+	pv = make_pv(restart, inverter=inverter)
+	assert pv.service.set_value('/Ac/AdvancedPwrControlEn', value) == 2
+	assert inverter.calls == []
+
+
+@pytest.mark.parametrize('value, percent', [(0, 0), (50, 50), (100, 100), (50.4, 50), ('75', 75)])
+def test_active_power_limit(restart, value, percent):
+	inverter = FakeInverter()
+	pv = make_pv(restart, inverter=inverter)
+	assert pv.service.set_value('/Ac/ActivePowerLimit', value) == 0
+	assert inverter.calls == [('limit', percent)]
+
+
+@pytest.mark.parametrize('value', [-1, 101, 'abc', [1]])
+def test_active_power_limit_invalid(restart, value):
+	inverter = FakeInverter()
+	pv = make_pv(restart, inverter=inverter)
+	assert pv.service.set_value('/Ac/ActivePowerLimit', value) == 2
+	assert inverter.calls == []
+
+
+def test_extension_path_write_error(restart, caplog):
+	inverter = FakeInverter()
+	inverter.error = True
+	pv = make_pv(restart, inverter=inverter)
+	assert pv.service.set_value('/Ac/ActivePowerLimit', 50) == 2
+	assert 'writing /Ac/ActivePowerLimit failed' in caplog.text
+
+
+# ---- InverterTemperature ----
+def test_temperature(restart):
+	temp = services.InverterTemperature('solaredge_7E123456_temperature', INVERTER_INFO, **common(restart))
+	temp.update(inverter_reading(temperature=-5.2))
+	s = temp.service
+	assert s.name == 'com.victronenergy.temperature.solaredge_7E123456_temperature'
+	assert s['/Temperature'] == -5.2
+	assert s['/TemperatureType'] == 2  # generic, not battery
+	assert s['/CustomName'] == 'PV inverter temperature'
+	assert s['/Status'] == 0
+	assert s.set_value('/TemperatureType', 4) == 0
+	assert s.set_value('/TemperatureType', 7) == 2
+
+
+# ---- ThrottleInput ----
+@pytest.mark.parametrize('status, power, state, alarm', [
+	(solaredge.STATUS_THROTTLED, 9000, 3, 2),
+	(solaredge.STATUS_THROTTLED, 50, 2, 0),
+	(solaredge.STATUS_THROTTLED, None, 2, 0),
+	(solaredge.STATUS_MPPT, 9000, 2, 0),
+])
+def test_throttle_input(restart, status, power, state, alarm):
+	throttle = services.ThrottleInput('throttle', INVERTER_INFO, **common(restart))
+	throttle.update(inverter_reading(power=power, status=status))
+	assert throttle.service['/State'] == state
+	assert throttle.service['/Alarm'] == alarm
+	assert throttle.service['/Type'] == 2
