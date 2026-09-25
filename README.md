@@ -6,7 +6,7 @@ Victron Venus integration for SolarEdge Inverters
 
 This service is meant to be run on a raspberry Pi with Venus OS from Victron or a for example a Cerbo GX device.
 
-The Python script cyclically reads data from the SolarEdge Inverter via Sunspec Modbus and publishes information on the dbus, using the services com.victronenergy.grid, com.victronenergy.pvinverter.pv0, com.victronenergy.temperature, com.victronenergy.digitalinput. This makes the Venus OS work as if you had a physical Victron Grid Meter installed and gives all information about PV Intervter load, temperature and if the inverter is in limit mode.
+The Python script cyclically reads data from the SolarEdge Inverter via Sunspec Modbus and publishes information on the dbus, using the services com.victronenergy.grid, com.victronenergy.pvinverter.pv0, com.victronenergy.temperature and optionally com.victronenergy.digitalinput. This makes the Venus OS work as if you had a physical Victron Grid Meter installed and gives all information about PV Intervter load, temperature and if the inverter is in limit mode.
 
 ![Dashboard shows Energy flow](images/dashboard.png?raw=true "Dashboard")
 ![Menu shows Entries of the Inverter](images/menu.png?raw=true "Menu")
@@ -25,13 +25,20 @@ Caution: There must be no other Modbus connection to the SolarEdge inverter. If 
 
 ### Configuration
 
-You need to modify the settings in the dbus-solaredge.py as needed:
+You need to modify the settings at the top of dbus-solaredge.py as needed:
 
 `SERVER_HOST = "192.168.178.80"`
 
 `SERVER_PORT = 502`
 
-`UNIT = 2 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID`
+`UNIT = 126 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID`
+
+Optional settings:
+
+- `MAX_POWER = 0` - max power of the inverter in W. With 0 it is read from the inverter; set a fixed value (e.g. 25000 for a SE25K) if that does not work.
+- `ENABLE_LIMIT_INPUT = False` - set to True to publish a digital input (com.victronenergy.digitalinput) which signals when the inverter is throttled.
+
+Host, port, unit and max power can also be passed on the command line, e.g. `python3 dbus-solaredge.py --host 192.168.1.50 --unit 1` (see `--help`).
 
 ### Installation
 
@@ -82,9 +89,11 @@ You could also take a look at the log-file:
 
 and see if there are any error messages.
 
+Short Modbus errors are logged and retried. After 30 failed update cycles in a row the script exits and is restarted by the supervisor. While the inverter is not reachable `/Connected` of the services is set to 0.
+
 When you think that the script crashes, start it directly from the command line:
 
-`python /data/dbus-solaredge/dbus-solaredge.py`
+`python3 /data/dbus-solaredge/dbus-solaredge.py`
 
 and see if it throws any error messages.
 
@@ -112,7 +121,7 @@ If you want to restart the script, for example after changing it, just run the f
 
 `/data/dbus-solaredge/kill_me.sh`
 
-The supervisor will restart the scriptwithin a few seconds.
+The supervisor will restart the script within a few seconds.
 
 ### Hardware
 

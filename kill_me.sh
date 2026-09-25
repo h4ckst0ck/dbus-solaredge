@@ -1,3 +1,2 @@
 #!/bin/bash
-kill $(pgrep -f 'python /data/dbus-solaredge/dbus-solaredge.py')
-
+pkill -f 'dbus-solaredge/dbus-solaredge.py'

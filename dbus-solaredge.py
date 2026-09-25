@@ -1,79 +1,73 @@
-#!/usr/bin/env python
- 
-# probably not all these required some are legacy and no longer used.
-from dbus.mainloop.glib import DBusGMainLoop
+#!/usr/bin/env python3
+"""Publish SolarEdge inverter and meter data (SunSpec Modbus TCP) on the Victron Venus OS dbus."""
 
-try:
-  import gobject  # Python 2.x
-except:
-  from gi.repository import GLib as gobject # Python 3.x
-
-# from gobject import idle_add
+import argparse
+import ctypes
+import logging
+import math
+import os
+import platform
+import sys
 
 import dbus
-import dbus.service
-import inspect
-import platform
-from threading import Timer
-import argparse
-import logging
-import sys
-import os
-import math
-import requests # for http GET
-# from pyModbusTCP.client import ModbusClient
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
 from pymodbus.client.sync import ModbusTcpClient as ModbusClient
 from pymodbus.constants import Endian
-from pymodbus.payload import BinaryPayloadDecoder
-from pymodbus.payload import BinaryPayloadBuilder
+from pymodbus.payload import BinaryPayloadBuilder, BinaryPayloadDecoder
 
-import time
-import ctypes
+# velib_python location differs between Venus OS versions
+sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
+sys.path.insert(2, '/opt/victronenergy/dbus-modem')
+from vedbus import VeDbusService
 
 log = logging.getLogger("DbusSolarEdge")
 
-sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-modem'))
-from vedbus import VeDbusService
-
 # ----------------------------------------------------------------
-VERSION     = "0.2"
+# Configuration (can also be overridden via command line, see --help)
+VERSION     = "0.3"
+SERVER_HOST = "192.168.178.80"
 SERVER_PORT = 502
 # setup the SolarEdge inverter based on this guide: https://www.victronenergy.com/live/venus-os:gx_solaredge
 UNIT = 126 # From SolarEdge Setapp in Communication -> RS481 -> Protocol -> SunSpec (Non-SE Logger) -> Device ID
+
+# max power (W) of the SolarEdge PV inverter. 0 = read it from the inverter (register 0xF304).
+# Set a fixed value (e.g. 25000 for a SE25K) in case the value can not be read via modbus.
+MAX_POWER = 0
+
+# publish com.victronenergy.digitalinput service which signals when the inverter is throttled
+ENABLE_LIMIT_INPUT = False
+
+UPDATE_INTERVAL_MS = 1000
+# stop (and let the supervisor restart us) after this many failed update cycles in a row
+MAX_CONSECUTIVE_ERRORS = 30
 # ----------------------------------------------------------------
-CONNECTION  = "ModbusTCP " + SERVER_HOST + ":" + str(SERVER_PORT) + ", UNIT " + str(UNIT)
 
-# max power (W) of the SolarEdge PV inverter (will be initialized later and read out from SE)
-# can be set to a fixed value (e.g. 25000 for a SE25K) in case the value can not get via modbus
-maxPower = 0 
+# SolarEdge power control registers
+REG_ACTIVE_POWER_LIMIT   = 0xF001 # uint16, %
+REG_COMMIT_POWER_CONTROL = 0xF100 # int16, write 1 to commit
+REG_ADV_PWR_CONTROL_EN   = 0xF142 # int32
+REG_MAX_ACTIVE_POWER     = 0xF304 # float32, W
 
-# Have a mainloop, so we can send/receive asynchronous calls to and from dbus
-DBusGMainLoop(set_as_default=True)
+# SunSpec "not implemented" markers
+NOT_IMPLEMENTED_UINT16 = 0xFFFF
+NOT_IMPLEMENTED_INT16  = 0x8000
 
-root = logging.getLogger()
-root.setLevel(logging.INFO)
+# SunSpec inverter model id -> number of phases
+PHASES_BY_MODEL = {101: 1, 102: 2, 103: 3}
 
-handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-root.addHandler(handler)
+# SolarEdge I_Status -> Victron pvinverter /StatusCode (everything else -> 8 = Standby)
+VICTRON_PV_STATE = {
+    3: 1,   # Grid Monitoring/wake-up -> Startup 1
+    4: 11,  # Producing power -> Running (MPPT)
+    5: 12,  # Production (curtailed) -> Running (Throttled)
+    7: 10,  # Fault -> Error
+}
 
-log.info('Startup, trying connection to Modbus-Server: '+ CONNECTION)
 
-modbusClient = ModbusClient(SERVER_HOST, port=SERVER_PORT, retry_on_empty=True ) 
+class ModbusError(Exception):
+    pass
 
-modbusClient.auto_open=True
-
-if not modbusClient.is_socket_open():
-    if not modbusClient.connect():
-        log.error("unable to connect to "+SERVER_HOST+":"+str(SERVER_PORT))
-        sys.exit()
-
-log.info('Connected to Modbus Server.')
-
-if (maxPower != 0):
-    log.info('Inverter maxPower manually set to %s W' % maxPower)
 
 def _get_string(regs):
     numbers = []
@@ -82,413 +76,356 @@ def _get_string(regs):
             numbers.append((x >> 8) & 0xFF)
         if (((x >> 0) & 0xFF) != 0):
             numbers.append((x >> 0) & 0xFF)
-    return ("".join(map(chr, numbers)))
+    return "".join(map(chr, numbers)).strip()
 
-def _get_signed_short(regs):
-    return ctypes.c_short(regs).value
+def _get_signed_short(reg):
+    return ctypes.c_short(reg).value
 
-def _get_scale_factor(regs):
-    return 10**_get_signed_short(regs)
+def _get_scale_factor(reg):
+    return 10**_get_signed_short(reg)
+
+def _uint16(reg, sf):
+    return None if reg == NOT_IMPLEMENTED_UINT16 else round(reg * sf, 2)
+
+def _int16(reg, sf):
+    return None if reg == NOT_IMPLEMENTED_INT16 else round(_get_signed_short(reg) * sf, 2)
+
+def _negate(value):
+    return None if value is None else -value
+
+def _energy_kwh(high, low, sf):
+    return float((high << 16) + low) * sf / 1000
 
 def _get_victron_pv_state(state):
-    if (state == 1):
-        return 0 
-    elif (state == 3):
-        return 1
-    elif (state == 4):
-        return 11
-    elif (state == 5):
-        return 12
-    elif (state == 7):
-        return 10
-    else:
-        return 8
+    return VICTRON_PV_STATE.get(state, 8)
+
+def _encode(kind, value):
+    builder = BinaryPayloadBuilder(byteorder=Endian.Big, wordorder=Endian.Little)
+    getattr(builder, 'add_' + kind)(value)
+    return builder.to_registers()
+
+def _decode(kind, registers):
+    decoder = BinaryPayloadDecoder.fromRegisters(registers, byteorder=Endian.Big, wordorder=Endian.Little)
+    return getattr(decoder, 'decode_' + kind)()
+
+def _to_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(number) else number
+
+def _text(unit, digits=None):
+    def fmt(path, value):
+        if value is None:
+            return ''
+        if digits is not None:
+            value = round(value, digits)
+        return '%s%s' % (value, unit)
+    return fmt
+
+_kwh = _text('kWh', 3)
+_a = _text('A', 2)
+_w = _text('W', 2)
+_v = _text('V', 2)
+_c = _text('C')
+_pct = _text('%')
+
 
 # Again not all of these needed this is just duplicating the Victron code.
 class SystemBus(dbus.bus.BusConnection):
     def __new__(cls):
         return dbus.bus.BusConnection.__new__(cls, dbus.bus.BusConnection.TYPE_SYSTEM)
- 
+
 class SessionBus(dbus.bus.BusConnection):
     def __new__(cls):
         return dbus.bus.BusConnection.__new__(cls, dbus.bus.BusConnection.TYPE_SESSION)
- 
+
 def dbusconnection():
     return SessionBus() if 'DBUS_SESSION_BUS_ADDRESS' in os.environ else SystemBus()
- 
 
-def _update():
-    global maxPower
-    try:
-        regs = modbusClient.read_holding_registers(40190, 70, unit=UNIT)
 
+class SolarEdge(object):
+    def __init__(self, client, unit, connection, max_power=0):
+        self.client = client
+        self.unit = unit
+        self.connection = connection
+        self.fixed_max_power = max_power
+        self.max_power = max_power
+        self.phases = 3
+        self.errors = 0
+        self.services = {}
+        self.on_fatal = None
+
+    # ---- modbus helpers ----
+    def read(self, address, count):
+        regs = self.client.read_holding_registers(address, count, unit=self.unit)
         if regs.isError():
-            log.error('regs.isError: '+str(regs))
-            sys.exit()                                                                             
-        else:
-           sf = _get_scale_factor(regs.registers[4])
-           dbusservice['grid']['/Ac/L1/Current'] = round(_get_signed_short(regs.registers[1]) * sf, 2)
-           dbusservice['grid']['/Ac/L2/Current'] = round(_get_signed_short(regs.registers[2]) * sf, 2)
-           dbusservice['grid']['/Ac/L3/Current'] = round(_get_signed_short(regs.registers[3]) * sf, 2)
-           sf = _get_scale_factor(regs.registers[13])
-           dbusservice['grid']['/Ac/L1/Voltage'] = round(_get_signed_short(regs.registers[6]) * sf, 2)
-           dbusservice['grid']['/Ac/L2/Voltage'] = round(_get_signed_short(regs.registers[7]) * sf, 2)
-           dbusservice['grid']['/Ac/L3/Voltage'] = round(_get_signed_short(regs.registers[8]) * sf, 2)
-           sf = _get_scale_factor(regs.registers[20])
-           dbusservice['grid']['/Ac/Power'] = round(_get_signed_short(regs.registers[16]) * sf * -1, 2)
-           dbusservice['grid']['/Ac/L1/Power'] = round(_get_signed_short(regs.registers[17]) * sf * -1, 2)
-           dbusservice['grid']['/Ac/L2/Power'] = round(_get_signed_short(regs.registers[18]) * sf * -1, 2)
-           dbusservice['grid']['/Ac/L3/Power'] = round(_get_signed_short(regs.registers[19]) * sf * -1, 2)
-           sf = _get_scale_factor(regs.registers[52])
-           dbusservice['grid']['/Ac/Energy/Reverse'] = float((regs.registers[36] << 16) + regs.registers[37]) * sf / 1000
-           dbusservice['grid']['/Ac/L1/Energy/Reverse'] = float((regs.registers[38] << 16) + regs.registers[39]) * sf / 1000
-           dbusservice['grid']['/Ac/L2/Energy/Reverse'] = float((regs.registers[40] << 16) + regs.registers[41]) * sf / 1000
-           dbusservice['grid']['/Ac/L3/Energy/Reverse'] = float((regs.registers[42] << 16) + regs.registers[43]) * sf / 1000
-           dbusservice['grid']['/Ac/Energy/Forward'] = float((regs.registers[44] << 16) + regs.registers[45]) * sf / 1000
-           dbusservice['grid']['/Ac/L1/Energy/Forward'] = float((regs.registers[46] << 16) + regs.registers[47]) * sf / 1000
-           dbusservice['grid']['/Ac/L2/Energy/Forward'] = float((regs.registers[48] << 16) + regs.registers[49]) * sf / 1000
-           dbusservice['grid']['/Ac/L3/Energy/Forward'] = float((regs.registers[50] << 16) + regs.registers[51]) * sf / 1000
+            raise ModbusError('read of %d registers at %d failed: %s' % (count, address, regs))
+        return regs.registers
 
-        # read registers, store result in regs list
-        regs = modbusClient.read_holding_registers(40071, 38, unit=UNIT)
-
-        if regs.isError():
-            log.error('regs.isError: '+str(regs))
-            sys.exit()                                                                             
-        else:
-           sf = _get_scale_factor(regs.registers[4])
-           dbusservice['pvinverter.pv0']['/Ac/L1/Current'] = round(regs.registers[1] * sf, 2)
-           dbusservice['pvinverter.pv0']['/Ac/L2/Current'] = round(regs.registers[2] * sf, 2)
-           dbusservice['pvinverter.pv0']['/Ac/L3/Current'] = round(regs.registers[3] * sf, 2)
-           sf = _get_scale_factor(regs.registers[11])
-           dbusservice['pvinverter.pv0']['/Ac/L1/Voltage'] = round(regs.registers[8] * sf, 2)
-           dbusservice['pvinverter.pv0']['/Ac/L2/Voltage'] = round(regs.registers[9] * sf, 2)
-           dbusservice['pvinverter.pv0']['/Ac/L3/Voltage'] = round(regs.registers[10] * sf, 2)
-           sf = _get_scale_factor(regs.registers[13])
-           acpower = _get_signed_short(regs.registers[12]) * sf
-           dbusservice['pvinverter.pv0']['/Ac/Power'] = acpower
-           dbusservice['pvinverter.pv0']['/Ac/L1/Power'] = round(_get_signed_short(regs.registers[12]) * sf / 3, 2)
-           dbusservice['pvinverter.pv0']['/Ac/L2/Power'] = round(_get_signed_short(regs.registers[12]) * sf / 3, 2)
-           dbusservice['pvinverter.pv0']['/Ac/L3/Power'] = round(_get_signed_short(regs.registers[12]) * sf / 3, 2)
-           sf = _get_scale_factor(regs.registers[24])
-           dbusservice['pvinverter.pv0']['/Ac/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 1000
-           dbusservice['pvinverter.pv0']['/Ac/L1/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000
-           dbusservice['pvinverter.pv0']['/Ac/L2/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000
-           dbusservice['pvinverter.pv0']['/Ac/L3/Energy/Forward'] = float((regs.registers[22] << 16) + regs.registers[23]) * sf / 3 / 1000
-           
-           dbusservice['pvinverter.pv0']['/StatusCode'] = _get_victron_pv_state(regs.registers[36])
-           dbusservice['pvinverter.pv0']['/ErrorCode'] = regs.registers[37]
-
-           sf = _get_scale_factor(regs.registers[35])
-           dbusservice['adc-temp0']['/Temperature'] = round(regs.registers[32] * sf, 2)
-
-           #if ((regs.registers[36] == 5) & (acpower > 100)):
-           #    dbusservice['digitalinput0']['/State'] = 3
-           #    dbusservice['digitalinput0']['/Alarm'] = 2
-           #else:
-           #    dbusservice['digitalinput0']['/State'] = 2
-           #    dbusservice['digitalinput0']['/Alarm'] = 0
-
-           # Read AdvancedPwrControlEn
-           regs = modbusClient.read_holding_registers( address=0xF142, count=2, unit=UNIT )
-
-           if regs.isError():
-               log.error('regs.isError: '+str(regs))
-               sys.exit()
-           else:
-               # log.info("_update(): enable registers %s" % regs.registers )
-               decoder = BinaryPayloadDecoder.fromRegisters( regs.registers, byteorder=Endian.Big, wordorder=Endian.Little )
-               dbusservice['pvinverter.pv0']['/Ac/AdvancedPwrControlEn'] = decoder.decode_32bit_int()
-
-           # Read MaxActivePower
-           regs = modbusClient.read_holding_registers( address=0xF304, count=2, unit=UNIT )
-
-           if regs.isError():
-               log.error('regs.isError: '+str(regs))
-               sys.exit()
-           else:
-               decoder = BinaryPayloadDecoder.fromRegisters( regs.registers, byteorder=Endian.Big, wordorder=Endian.Little )
-               decodedMaxPower = decoder.decode_32bit_float()
-
-               if maxPower != decodedMaxPower:
-                  log.info('Inverter maxPower received: %s W' % decodedMaxPower)
-
-               maxPower = decodedMaxPower
-               dbusservice['pvinverter.pv0']['/Ac/MaxPower'] = decodedMaxPower
-
-           # Read power limiter register
-           regs = modbusClient.read_holding_registers( address=0xF001, count=1, unit=UNIT )
-
-           if regs.isError():
-               log.error('regs.isError: '+str(regs))
-               sys.exit()
-           else:
-               decoder = BinaryPayloadDecoder.fromRegisters( regs.registers, byteorder=Endian.Big, wordorder=Endian.Little )
-               powerlimitRel= decoder.decode_16bit_uint() # SolarEdge relative power limit in %
-               dbusservice['pvinverter.pv0']['/Ac/ActivePowerLimit'] = powerlimitRel
-               powerlimit= int(maxPower * powerlimitRel / 100) # calculate absolute limit in W
-               dbusservice['pvinverter.pv0']['/Ac/PowerLimit'] = powerlimit # ESS dynamic zero feed-in power limit
-
-    except:
-        log.error('exception in _update.',exc_info=1)
-        sys.exit()
-
-    return True
-
-def _handleAdvancedPwrControlEn(path, value):
-    log.info("_handleAdvancedPwrControlEn(): someone else updated %s to %s" % (path, value))
-
-    try:
-        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
-        builder.add_32bit_int( value )
-        # log.info("_handleAdvancedPwrControlEn(): registers %s" % builder.to_registers() )
-        result = modbusClient.write_registers( address=0xF142, values=builder.to_registers(), unit=UNIT )
-
+    def write(self, address, registers):
+        result = self.client.write_registers(address, registers, unit=self.unit)
         if result.isError():
-            log.error('result.isError(): '+str(result))
+            raise ModbusError('write to %d failed: %s' % (address, result))
 
-    except Exception as e:
-        log.error('Exception in _handleAdvancedPwrControlEn(): %s' % e )
-        sys.exit()
+    # ---- dbus services ----
+    def _new_service(self, type, physical, instance, common, product_id):
+        # common = SunSpec common block registers (Manufacturer, Model, Options, Version, Serial)
+        service = VeDbusService("com.victronenergy.{}.{}_id00".format(type, physical), dbusconnection())
 
-    return True # accept the change
+        # Create the management objects, as specified in the ccgx dbus-api document
+        service.add_path('/Mgmt/ProcessName', __file__)
+        service.add_path('/Mgmt/ProcessVersion', VERSION + ' on Python ' + platform.python_version())
+        service.add_path('/Mgmt/Connection', self.connection)
+        service.add_path('/Connected', 1)
+        service.add_path('/HardwareVersion', 0)
+        service.add_path('/DeviceInstance', instance)
+        service.add_path('/ProductId', product_id)
+        service.add_path('/ProductName', _get_string(common[0:16]) + " " + _get_string(common[16:32]))
+        service.add_path('/FirmwareVersion', _get_string(common[40:48]))
+        service.add_path('/DataManagerVersion', VERSION)
+        service.add_path('/Serial', _get_string(common[48:64]))
+        return service
 
-def _handlePowerLimit(path, value):
-    if (maxPower==0):
-        log.warning('_handlePowerLimit(): maxPower is unknown, unable to set power limit')
-        return false;
+    def create_services(self):
+        meter = self.read(40123, 64)
+        inverter = self.read(40004, 64)
+        self.phases = PHASES_BY_MODEL.get(self.read(40069, 1)[0], 3)
+        log.info('Inverter has %d phase(s)' % self.phases)
 
-    # calculate relative value for SolarEdge
-    relVal=min(100,max(0,int(math.ceil(100 * value / maxPower))));
-    #log.info("_handlePowerLimit(): someone else updated %s to %s (%s)" % (path, value, relVal))
+        grid = self._new_service('grid', 'grid', 0, meter, 16) # value used in ac_sensor_bridge.cpp of dbus-cgwacs
+        grid.add_path('/CustomName', "Grid meter " + _get_string(meter[32:40]))
+        grid.add_path('/Ac/Power', None, gettextcallback=_w)
+        for phase in ('L1', 'L2', 'L3'):
+            grid.add_path('/Ac/%s/Voltage' % phase, None, gettextcallback=_v)
+            grid.add_path('/Ac/%s/Current' % phase, None, gettextcallback=_a)
+            grid.add_path('/Ac/%s/Power' % phase, None, gettextcallback=_w)
+            grid.add_path('/Ac/%s/Energy/Forward' % phase, None, gettextcallback=_kwh)
+            grid.add_path('/Ac/%s/Energy/Reverse' % phase, None, gettextcallback=_kwh)
+        grid.add_path('/Ac/Energy/Forward', None, gettextcallback=_kwh) # energy bought from the grid
+        grid.add_path('/Ac/Energy/Reverse', None, gettextcallback=_kwh) # energy sold to the grid
+        self.services['grid'] = grid
 
-    if ((relVal < 0) or (relVal > 100)):
-        log.warning('_handlePowerLimit(): value %s (%s) out of scope (0 <= value <= 100' % ( relVal, value) )
-        return False
+        pv = self._new_service('pvinverter.pv0', 'pvinverter', 20, inverter, 41284)
+        pv.add_path('/Ac/Energy/Forward', None, gettextcallback=_kwh)
+        pv.add_path('/Ac/Power', None, gettextcallback=_w)
+        for phase in ('L1', 'L2', 'L3'):
+            pv.add_path('/Ac/%s/Current' % phase, None, gettextcallback=_a)
+            pv.add_path('/Ac/%s/Energy/Forward' % phase, None, gettextcallback=_kwh)
+            pv.add_path('/Ac/%s/Power' % phase, None, gettextcallback=_w)
+            pv.add_path('/Ac/%s/Voltage' % phase, None, gettextcallback=_v)
+        pv.add_path('/Ac/MaxPower', None, gettextcallback=_w)
+        pv.add_path('/ErrorCode', None)
+        pv.add_path('/Position', 0)
+        pv.add_path('/StatusCode', None)
+        pv.add_path('/Ac/PowerLimit', value=None, description='ESS zero feed-in power limit in W', writeable=True, onchangecallback=self._handle_power_limit, gettextcallback=_w)
+        pv.add_path('/Ac/AdvancedPwrControlEn', value=None, description='Enable SolarEdge power limitation', writeable=True, onchangecallback=self._handle_adv_pwr_control_en)
+        pv.add_path('/Ac/ActivePowerLimit', value=None, description='SolarEdge active power limit in %', writeable=True, onchangecallback=self._handle_active_power_limit, gettextcallback=_pct)
+        self.services['pv'] = pv
 
-    try:
-        # Enable AdvancedPwrControl
-        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
-        builder.add_32bit_int( 1 )
-        # log.info("_handleAdvancedPwrControlEn(): registers %s" % builder.to_registers() )
-        result = modbusClient.write_registers( address=0xF142, values=builder.to_registers(), unit=UNIT )
+        temp = self._new_service('temperature', 'temp_pvinverter', 26, inverter, 0)
+        temp.add_path('/CustomName', 'PV Inverter Temperature')
+        temp.add_path('/Temperature', None, gettextcallback=_c)
+        temp.add_path('/Status', 0)
+        temp.add_path('/TemperatureType', 2, writeable=True) # 2 = generic
+        self.services['temp'] = temp
 
-        if result.isError():
-            log.error('result.isError(): '+str(result))
-            
-        # Write new Power Limit
-        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
-        builder.add_16bit_uint( relVal )
-        # log.info("_handlePowerLimit(): write registers %s" % builder.to_registers() )
-        result = modbusClient.write_registers( address=0xF001, values=builder.to_registers(), unit=UNIT )
+        if ENABLE_LIMIT_INPUT:
+            limit = self._new_service('digitalinput', 'limit_pvinverter', 10, inverter, 0)
+            limit.add_path('/CustomName', 'PV Inverter Limiter active')
+            limit.add_path('/State', None)
+            limit.add_path('/Status', 0)
+            limit.add_path('/Type', 2, writeable=True)
+            limit.add_path('/Alarm', None, writeable=True)
+            self.services['limit'] = limit
 
-        if result.isError():
-            log.error('result.isError(): '+str(result))
+        if self.fixed_max_power:
+            log.info('Inverter maxPower manually set to %s W' % self.fixed_max_power)
 
-        # Commit new Power Limit
-        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
-        builder.add_16bit_int( 1 )
-        # log.info("_handlePowerLimit(): commit registers %s" % builder.to_registers() )
-        result = modbusClient.write_registers( address=0xF100, values=builder.to_registers(), unit=UNIT )
+    # ---- cyclic update ----
+    def update(self):
+        try:
+            self._update_grid()
+            self._update_inverter()
+            self._update_power_control()
+        except Exception:
+            self.errors += 1
+            if self.errors == 1:
+                log.error('update failed, will retry', exc_info=True)
+                self._set_connected(0)
+            if self.errors >= MAX_CONSECUTIVE_ERRORS:
+                log.error('%d consecutive update errors, giving up' % self.errors)
+                if self.on_fatal:
+                    self.on_fatal()
+                return False
+            return True
 
-        if result.isError():
-            log.error('result.isError(): '+str(result))
+        if self.errors:
+            log.info('update succeeded again after %d error(s)' % self.errors)
+            self.errors = 0
+            self._set_connected(1)
+        return True
+
+    def _set_connected(self, value):
+        for service in self.services.values():
+            service['/Connected'] = value
+
+    def _update_grid(self):
+        grid = self.services['grid']
+        r = self.read(40190, 70)
+        sf_i = _get_scale_factor(r[4])
+        sf_u = _get_scale_factor(r[13])
+        sf_p = _get_scale_factor(r[20])
+        sf_e = _get_scale_factor(r[52])
+        grid['/Ac/Power'] = _negate(_int16(r[16], sf_p))
+        grid['/Ac/Energy/Reverse'] = _energy_kwh(r[36], r[37], sf_e)
+        grid['/Ac/Energy/Forward'] = _energy_kwh(r[44], r[45], sf_e)
+        for i, phase in enumerate(('L1', 'L2', 'L3')):
+            grid['/Ac/%s/Current' % phase] = _int16(r[1 + i], sf_i)
+            grid['/Ac/%s/Voltage' % phase] = _int16(r[6 + i], sf_u)
+            grid['/Ac/%s/Power' % phase] = _negate(_int16(r[17 + i], sf_p))
+            grid['/Ac/%s/Energy/Reverse' % phase] = _energy_kwh(r[38 + 2 * i], r[39 + 2 * i], sf_e)
+            grid['/Ac/%s/Energy/Forward' % phase] = _energy_kwh(r[46 + 2 * i], r[47 + 2 * i], sf_e)
+
+    def _update_inverter(self):
+        pv = self.services['pv']
+        r = self.read(40071, 38)
+        sf_i = _get_scale_factor(r[4])
+        sf_u = _get_scale_factor(r[11])
+        power = _int16(r[12], _get_scale_factor(r[13]))
+        energy = _energy_kwh(r[22], r[23], _get_scale_factor(r[24]))
+        pv['/Ac/Power'] = power
+        pv['/Ac/Energy/Forward'] = energy
+        for i, phase in enumerate(('L1', 'L2', 'L3')):
+            active = i < self.phases
+            # per phase power/energy is not available, so the total is split evenly
+            pv['/Ac/%s/Current' % phase] = _uint16(r[1 + i], sf_i) if active else None
+            pv['/Ac/%s/Voltage' % phase] = _uint16(r[8 + i], sf_u) if active else None
+            pv['/Ac/%s/Power' % phase] = round(power / self.phases, 2) if active and power is not None else None
+            pv['/Ac/%s/Energy/Forward' % phase] = energy / self.phases if active else None
+
+        pv['/StatusCode'] = _get_victron_pv_state(r[36])
+        pv['/ErrorCode'] = r[37]
+
+        self.services['temp']['/Temperature'] = _int16(r[32], _get_scale_factor(r[35]))
+
+        if 'limit' in self.services:
+            limit = self.services['limit']
+            throttled = r[36] == 5 and (power or 0) > 100
+            limit['/State'] = 3 if throttled else 2
+            limit['/Alarm'] = 2 if throttled else 0
+
+    def _update_power_control(self):
+        pv = self.services['pv']
+        pv['/Ac/AdvancedPwrControlEn'] = _decode('32bit_int', self.read(REG_ADV_PWR_CONTROL_EN, 2))
+
+        if not self.fixed_max_power:
+            max_power = _decode('32bit_float', self.read(REG_MAX_ACTIVE_POWER, 2))
+            if max_power != self.max_power:
+                log.info('Inverter maxPower received: %s W' % max_power)
+            self.max_power = max_power
+        pv['/Ac/MaxPower'] = self.max_power
+
+        limit_rel = _decode('16bit_uint', self.read(REG_ACTIVE_POWER_LIMIT, 1)) # SolarEdge relative power limit in %
+        pv['/Ac/ActivePowerLimit'] = limit_rel
+        pv['/Ac/PowerLimit'] = int(self.max_power * limit_rel / 100) # ESS dynamic zero feed-in power limit in W
+
+    # ---- dbus write handlers ----
+    def _write_active_power_limit(self, percent):
+        self.write(REG_ACTIVE_POWER_LIMIT, _encode('16bit_uint', percent))
+        self.write(REG_COMMIT_POWER_CONTROL, _encode('16bit_int', 1))
+
+    def _handle_adv_pwr_control_en(self, path, value):
+        log.info("someone else updated %s to %s" % (path, value))
+        number = _to_number(value)
+        if number not in (0, 1):
+            log.warning('%s: invalid value %s (allowed: 0, 1)' % (path, value))
+            return False
+        try:
+            self.write(REG_ADV_PWR_CONTROL_EN, _encode('32bit_int', int(number)))
+        except Exception:
+            log.error('writing %s failed' % path, exc_info=True)
+            return False
+        return True # accept the change
+
+    def _handle_power_limit(self, path, value):
+        if self.max_power <= 0:
+            log.warning('%s: maxPower is unknown, unable to set power limit' % path)
+            return False
+        watts = _to_number(value)
+        if watts is None:
+            log.warning('%s: invalid value %s' % (path, value))
+            return False
+
+        # calculate relative value for SolarEdge
+        percent = min(100, max(0, int(math.ceil(100 * watts / self.max_power))))
+        try:
+            if self.services['pv']['/Ac/AdvancedPwrControlEn'] != 1:
+                log.info('enabling AdvancedPwrControl')
+                self.write(REG_ADV_PWR_CONTROL_EN, _encode('32bit_int', 1))
+            self._write_active_power_limit(percent)
+        except Exception:
+            log.error('writing %s failed' % path, exc_info=True)
+            return False
+        return True # accept the change
+
+    def _handle_active_power_limit(self, path, value):
+        log.info("someone else updated %s to %s" % (path, value))
+        number = _to_number(value)
+        if number is None or number < 0 or number > 100:
+            log.warning('%s: value %s out of range (0 <= value <= 100)' % (path, value))
+            return False
+        try:
+            self._write_active_power_limit(int(round(number)))
+        except Exception:
+            log.error('writing %s failed' % path, exc_info=True)
+            return False
+        return True # accept the change
 
 
-    except Exception as e:
-        log.error('Exception in _handlePowerLimit(): %s' % e )
-        sys.exit()
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', default=SERVER_HOST, help='IP address of the SolarEdge inverter')
+    parser.add_argument('--port', type=int, default=SERVER_PORT, help='Modbus TCP port')
+    parser.add_argument('--unit', type=int, default=UNIT, help='Modbus device id')
+    parser.add_argument('--max-power', type=float, default=MAX_POWER, help='fixed inverter max power in W (0 = read from inverter)')
+    args = parser.parse_args()
 
-    return True # accept the change
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
 
-def _handleActivePowerLimit(path, value):
-    log.info("_handleActivePowerLimit(): someone else updated %s to %s" % (path, value))
-    if ((value < 0) or (value > 100)):
-        log.warning("_handleActivePowerLimit(): value out of scope (0 <= value <= 100" )
-        return False
+    # Have a mainloop, so we can send/receive asynchronous calls to and from dbus
+    DBusGMainLoop(set_as_default=True)
 
-    try:
-        # Write new Active Power Limit
-        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
-        builder.add_16bit_uint( value )
-        # log.info("_handleActivePowerLimit(): write registers %s" % builder.to_registers() )
-        result = modbusClient.write_registers( address=0xF001, values=builder.to_registers(), unit=UNIT )
+    connection = "ModbusTCP %s:%d, UNIT %d" % (args.host, args.port, args.unit)
+    log.info('Startup, trying connection to Modbus-Server: ' + connection)
 
-        if result.isError():
-            log.error('result.isError(): '+str(result))
+    client = ModbusClient(args.host, port=args.port, retry_on_empty=True)
+    if not client.connect():
+        log.error("unable to connect to %s:%d" % (args.host, args.port))
+        sys.exit(1)
+    log.info('Connected to Modbus Server.')
 
-        # Commit new Active Power Limit
-        builder = BinaryPayloadBuilder( byteorder=Endian.Big, wordorder=Endian.Little )
-        builder.add_16bit_int( 1 )
-        # log.info("_handleActivePowerLimit(): commit registers %s" % builder.to_registers() )
-        result = modbusClient.write_registers( address=0xF100, values=builder.to_registers(), unit=UNIT )
+    solaredge = SolarEdge(client, args.unit, connection, args.max_power)
+    solaredge.create_services()
 
-        if result.isError():
-            log.error('result.isError(): '+str(result))
+    mainloop = GLib.MainLoop()
+    solaredge.on_fatal = mainloop.quit
 
+    # Everything done so just set a time to run an update function to update the data values every second.
+    GLib.timeout_add(UPDATE_INTERVAL_MS, solaredge.update)
 
-    except Exception as e:
-        log.error('Exception in _handleActivePowerLimit(): %s' % e )
-        sys.exit()
+    log.info('Connected to dbus, and switching over to GLib.MainLoop() (= event based)')
+    mainloop.run()
 
-    return True # accept the change
+    # only reached after too many errors, the supervisor will restart us
+    client.close()
+    sys.exit(1)
 
 
-# Here is the bit you need to create multiple new services - try as much as possible timplement the Victron Dbus API requirements.
-def new_service(base, type, physical, id, instance):
-    self =  VeDbusService("{}.{}.{}_id{:02d}".format(base, type, physical,  id), dbusconnection())
-
-    # Create the management objects, as specified in the ccgx dbus-api document
-    self.add_path('/Mgmt/ProcessName', __file__)
-    self.add_path('/Mgmt/ProcessVersion', 'Unkown version, and running on Python ' + platform.python_version())
-    self.add_path('/Connected', 1)  
-    self.add_path('/HardwareVersion', 0)
-
-    _kwh = lambda p, v: (str(round(v,3)) + 'kWh')
-    _a = lambda p, v: (str(round(v,2)) + 'A')
-    _w = lambda p, v: (str(round(v,2)) + 'W')
-    _v = lambda p, v: (str(round(v,2)) + 'V')
-    _c = lambda p, v: (str(v) + 'C')
-    _p = lambda p, v: (str(min(100,max(0,int(math.ceil(100 * v / maxPower))))) + '%') if maxPower>0 else 'null'
-
-    # Create device type specific objects
-    if physical == 'grid':
-        # if open() is ok, read register (modbus function 0x03)
-        if modbusClient.is_socket_open():
-            # read registers, store result in regs list
-            regs = modbusClient.read_holding_registers(40123, 64, unit=UNIT)
-            if regs.isError():
-                log.error('regs.isError: '+str(regs))
-                sys.exit()                                                                             
-            else:
-                self.add_path('/DeviceInstance', instance)
-                self.add_path('/FirmwareVersion', _get_string(regs.registers[40:47]))
-                self.add_path('/DataManagerVersion', VERSION)
-                self.add_path('/Serial', _get_string(regs.registers[48:63]))
-                self.add_path('/Mgmt/Connection', CONNECTION)
-                self.add_path('/ProductId', 16) # value used in ac_sensor_bridge.cpp of dbus-cgwacs
-                self.add_path('/ProductName',  _get_string(regs.registers[0:15])+" "+_get_string(regs.registers[16:31]))
-                self.add_path('/CustomName', "Grid meter " +_get_string(regs.registers[32:39]))
-                self.add_path('/Ac/Power', None, gettextcallback=_w)
-                self.add_path('/Ac/L1/Voltage', None, gettextcallback=_v)
-                self.add_path('/Ac/L2/Voltage', None, gettextcallback=_v)
-                self.add_path('/Ac/L3/Voltage', None, gettextcallback=_v)
-                self.add_path('/Ac/L1/Current', None, gettextcallback=_a)
-                self.add_path('/Ac/L2/Current', None, gettextcallback=_a)
-                self.add_path('/Ac/L3/Current', None, gettextcallback=_a)
-                self.add_path('/Ac/L1/Power', None, gettextcallback=_w)
-                self.add_path('/Ac/L2/Power', None, gettextcallback=_w) 
-                self.add_path('/Ac/L3/Power', None, gettextcallback=_w) 
-                self.add_path('/Ac/L1/Energy/Forward', None, gettextcallback=_kwh)
-                self.add_path('/Ac/L2/Energy/Forward', None, gettextcallback=_kwh)
-                self.add_path('/Ac/L3/Energy/Forward', None, gettextcallback=_kwh)
-                self.add_path('/Ac/L1/Energy/Reverse', None, gettextcallback=_kwh)
-                self.add_path('/Ac/L2/Energy/Reverse', None, gettextcallback=_kwh)
-                self.add_path('/Ac/L3/Energy/Reverse', None, gettextcallback=_kwh)
-                self.add_path('/Ac/Energy/Forward', None, gettextcallback=_kwh) # energy bought from the grid
-                self.add_path('/Ac/Energy/Reverse', None, gettextcallback=_kwh) # energy sold to the grid
-
-    if physical == 'pvinverter':
-        # if open() is ok, read register (modbus function 0x03)
-        if modbusClient.is_socket_open():
-            # read registers, store result in regs list
-            regs = modbusClient.read_holding_registers(40004, 56, unit=UNIT)
-            if regs.isError():
-                log.error('regs.isError: '+str(regs))
-                sys.exit()                                                                             
-            else:   
-                self.add_path('/DeviceInstance', instance)
-                self.add_path('/FirmwareVersion', _get_string(regs.registers[32:47]))
-                self.add_path('/DataManagerVersion', VERSION)
-                self.add_path('/Serial', _get_string(regs.registers[48:55]))
-                self.add_path('/Mgmt/Connection', CONNECTION)
-                self.add_path('/ProductId', 41284) # value used in ac_sensor_bridge.cpp of dbus-cgwacs
-                self.add_path('/ProductName', _get_string(regs.registers[0:15])+" "+_get_string(regs.registers[16:31]))
-                self.add_path('/Ac/Energy/Forward', None, gettextcallback=_kwh)
-                self.add_path('/Ac/Power', None, gettextcallback=_w)
-                self.add_path('/Ac/L1/Current', None, gettextcallback=_a)
-                self.add_path('/Ac/L2/Current', None, gettextcallback=_a)
-                self.add_path('/Ac/L3/Current', None, gettextcallback=_a)
-                self.add_path('/Ac/L1/Energy/Forward', None, gettextcallback=_kwh)
-                self.add_path('/Ac/L2/Energy/Forward', None, gettextcallback=_kwh)
-                self.add_path('/Ac/L3/Energy/Forward', None, gettextcallback=_kwh)
-                self.add_path('/Ac/L1/Power', None, gettextcallback=_w)
-                self.add_path('/Ac/L2/Power', None, gettextcallback=_w)
-                self.add_path('/Ac/L3/Power', None, gettextcallback=_w)
-                self.add_path('/Ac/L1/Voltage', None, gettextcallback=_v)
-                self.add_path('/Ac/L2/Voltage', None, gettextcallback=_v)
-                self.add_path('/Ac/L3/Voltage', None, gettextcallback=_v)
-                self.add_path('/Ac/MaxPower', None, gettextcallback=_w)
-                self.add_path('/ErrorCode', None)
-                self.add_path('/Position', 0)
-                self.add_path('/StatusCode', None)
-                self.add_path('/Ac/PowerLimit', value=None, description='ESS zero feed-in power limit in W', writeable=True, onchangecallback=_handlePowerLimit, gettextcallback=_w )
-                self.add_path('/Ac/AdvancedPwrControlEn', value=None, description='Enable SolarEdge power limitation', writeable=True, onchangecallback=_handleAdvancedPwrControlEn )
-                self.add_path('/Ac/ActivePowerLimit', value=None, description='SolarEdge active power limit in %', writeable=True, onchangecallback=_handleActivePowerLimit, gettextcallback=_p )
-
-    if physical == 'temp_pvinverter':
-        # if open() is ok, read register (modbus function 0x03)
-        if modbusClient.is_socket_open():
-            # read registers, store result in regs list
-            regs = modbusClient.read_holding_registers(40004, 56, unit=UNIT)
-            if regs.isError():
-                log.error('regs.isError: '+str(regs))
-                sys.exit()                                                                             
-            else:   
-                self.add_path('/DeviceInstance', instance)
-                self.add_path('/FirmwareVersion', _get_string(regs.registers[32:47]))
-                self.add_path('/DataManagerVersion', VERSION)
-                self.add_path('/Serial', _get_string(regs.registers[48:55]))
-                self.add_path('/Mgmt/Connection', CONNECTION)
-                self.add_path('/ProductName', _get_string(regs.registers[0:15])+" "+_get_string(regs.registers[16:31]))
-                self.add_path('/ProductId', 0) 
-                self.add_path('/CustomName', 'PV Inverter Temperature')
-                self.add_path('/Temperature', None, gettextcallback=_c)
-                self.add_path('/Status', 0)
-                self.add_path('/TemperatureType', 0, writeable=True)
-
-    if physical == 'limit_pvinverter':
-        # if open() is ok, read register (modbus function 0x03)
-        if modbusClient.is_socket_open():
-            # read registers, store result in regs list
-            regs = modbusClient.read_holding_registers(40004, 56, unit=UNIT)
-            if regs.isError():
-                log.error('regs.isError: '+str(regs))
-                sys.exit()                                                                             
-            else:   
-                self.add_path('/DeviceInstance', instance)
-                self.add_path('/FirmwareVersion', _get_string(regs.registers[32:47]))
-                self.add_path('/DataManagerVersion', VERSION)
-                self.add_path('/Serial', _get_string(regs.registers[48:55]))
-                self.add_path('/Mgmt/Connection', CONNECTION)
-                self.add_path('/ProductName', _get_string(regs.registers[0:15])+" "+_get_string(regs.registers[16:31]))
-                self.add_path('/ProductId', 0) 
-                self.add_path('/CustomName', 'PV Inverter Limiter active')
-                self.add_path('/State', None)
-                self.add_path('/Status', 0)
-                self.add_path('/Type', 2, writeable=True)
-                self.add_path('/Alarm', None, writeable=True)
-
-    return self
-
-dbusservice = {} # Dictonary to hold the multiple services
- 
-base = 'com.victronenergy'
-
-# service defined by (base*, type*, id*, instance):
-# * items are include in service name
-# Create all the dbus-services we want
-dbusservice['grid']           = new_service(base, 'grid',           'grid',              0, 0)
-dbusservice['pvinverter.pv0'] = new_service(base, 'pvinverter.pv0', 'pvinverter',        0, 20)
-dbusservice['adc-temp0']      = new_service(base, 'temperature',    'temp_pvinverter',   0, 26)
-
-# if you need dbus service for limit pvinverter, please enable the next line and also the code above which uses 'digitalinput0' to write registers
-# dbusservice['digitalinput0']  = new_service(base, 'digitalinput',   'limit_pvinverter',  0, 10)
-
-# Everything done so just set a time to run an update function to update the data values every second.
-gobject.timeout_add(1000, _update)
-
-log.info('Connected to dbus, and switching over to GLib.MainLoop() (= event based)')
-
-mainloop = gobject.MainLoop()
-mainloop.run()
+if __name__ == '__main__':
+    main()
