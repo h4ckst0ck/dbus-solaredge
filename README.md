@@ -123,6 +123,17 @@ If you want to restart the script, for example after changing it, just run the f
 
 The supervisor will restart the script within a few seconds.
 
+### Tests
+
+The tests run on any machine, Venus OS is not needed (dbus, GLib and vedbus are replaced by stubs, the inverter by a fake Modbus client):
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
+The test run fails if the coverage of dbus-solaredge.py drops below 100 % (lines and branches).
+
 ### Hardware
 
 In my installation at home, I am using the following Hardware:
